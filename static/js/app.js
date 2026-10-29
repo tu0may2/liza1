@@ -10,7 +10,7 @@
 'use strict';
 
 let route = { view: 'dash', cpId: '', sub: 'summary', orderId: '' };
-let filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '' };
+let filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '', scan: '' };
 
 /* ------------------------------------------------------------------ */
 /* Мелкие помощники разметки                                          */
@@ -281,6 +281,175 @@ function openForm(cfg) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Вложенные файлы документа                                          */
+/* ------------------------------------------------------------------ */
+const MAX_FILE_MB = 25;
+
+/* Скрепка в таблице: сразу видно, есть ли скан и подписан ли он. */
+function clipHTML(doc) {
+  const st = docSignState(doc);
+  if (!st.count) return '<span class="hint">—</span>';
+  const cls = st.key === 'both' ? ' paperclip--signed' : '';
+  return '<span class="paperclip' + cls + '" title="' + esc(st.label) + '">📎 ' + st.count +
+    ' · ' + esc(st.label) + '</span>';
+}
+
+function signTag(signed) {
+  const st = SIGN_STATES[signed] || SIGN_STATES.none;
+  return tag(st.label, st.tag);
+}
+
+/* Открыть файл в новой вкладке. Страница может быть открыта из файла, и
+   тогда у blob-ссылки нет происхождения — переход делаем настоящей
+   ссылкой по клику пользователя, так надёжнее, чем window.open. */
+function openBlob(blob, name, download) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  if (download) a.download = asciiFileName(name, 'document.pdf');
+  else { a.target = '_blank'; a.rel = 'noopener'; }
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+function openFilesModal(docId) {
+  const doc = db().documents.find((x) => x.id === docId);
+  if (!doc) return;
+
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML =
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="Файлы документа">' +
+      '<header class="modal__head"><h2>Файлы: ' +
+        esc(DOC_TYPES[doc.type] || doc.type) + ' №' + esc(doc.number || '—') + '</h2>' +
+        '<button class="btn btn--sm" data-close type="button">Закрыть</button></header>' +
+      '<div class="modal__body">' +
+        '<p class="hint" style="margin-top:0">' + esc(cpName(doc.cpId)) + ' · ' + fmtDate(doc.date) +
+          (Number(doc.amount) ? ' · ' + fmtMoney(doc.amount) : '') + '</p>' +
+        '<div class="drop" id="drop" tabindex="0" role="button">' +
+          '<b>Перетащите сюда PDF или нажмите, чтобы выбрать</b>' +
+          'Можно сразу несколько файлов: неподписанный и подписанный экземпляры. ' +
+          'Принимаются PDF и фотографии скана, до ' + MAX_FILE_MB + '\u00a0МБ каждый.' +
+        '</div>' +
+        '<input type="file" id="file-input" accept="application/pdf,image/*" multiple hidden>' +
+        '<div id="file-list" style="margin-top:16px"></div>' +
+      '</div>' +
+      '<footer class="modal__foot">' +
+        '<button class="btn btn--primary" data-close type="button">Готово</button>' +
+      '</footer>' +
+    '</div>';
+
+  const close = () => { document.removeEventListener('keydown', onKey); back.remove(); render(); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+
+  const listBox = () => back.querySelector('#file-list');
+
+  function paint() {
+    const list = docFiles(doc);
+    if (!list.length) {
+      listBox().innerHTML = '<p class="empty">Файлов пока нет</p>';
+      return;
+    }
+    listBox().innerHTML = '<div class="files">' + list.map((f) =>
+      '<div class="file">' +
+        '<span class="file__icon">' + (/(^image\/)/.test(f.type || '') ? 'IMG' : 'PDF') + '</span>' +
+        '<span class="file__body">' +
+          '<span class="file__name" title="' + esc(f.name) + '">' + esc(f.name) + '</span>' +
+          '<span class="file__meta">' + fmtSize(f.size) + ' · загружен ' + fmtDate(f.addedAt) + '</span>' +
+        '</span>' +
+        '<label class="field" style="min-width:210px">' +
+          '<span>Подписание</span>' +
+          '<select data-sign="' + esc(f.id) + '">' +
+            selectOptions(Object.keys(SIGN_STATES).map((k) => [k, SIGN_STATES[k].label]), f.signed) +
+          '</select>' +
+        '</label>' +
+        '<span class="file__actions">' +
+          '<button class="btn btn--sm" data-file-open="' + esc(f.id) + '" type="button">Открыть</button>' +
+          '<button class="btn btn--sm" data-file-save="' + esc(f.id) + '" type="button">Скачать</button>' +
+          '<button class="btn btn--sm btn--danger" data-file-del="' + esc(f.id) + '" type="button">Удалить</button>' +
+        '</span>' +
+      '</div>').join('') + '</div>';
+  }
+
+  function addFiles(fileList) {
+    const files = Array.prototype.slice.call(fileList || []);
+    if (!files.length) return;
+    const tooBig = files.filter((f) => f.size > MAX_FILE_MB * 1048576);
+    if (tooBig.length) {
+      alert('Слишком большие файлы (больше ' + MAX_FILE_MB + ' МБ):\n' +
+            tooBig.map((f) => f.name).join('\n') + '\n\nСожмите скан и попробуйте снова.');
+    }
+    const ok = files.filter((f) => f.size <= MAX_FILE_MB * 1048576);
+    Promise.all(ok.map((f) => {
+      const id = uid('file');
+      return filePut(id, f).then(() => {
+        docFiles(doc).push({
+          id: id, name: f.name, size: f.size, type: f.type || 'application/pdf',
+          signed: 'none', addedAt: today()
+        });
+      });
+    })).then(() => { save(); paint(); })
+      .catch((e) => alert('Не удалось сохранить файл: ' + e.message));
+  }
+
+  back.addEventListener('click', (e) => {
+    if (e.target === back || e.target.closest('[data-close]')) { close(); return; }
+    if (e.target.closest('#drop')) { back.querySelector('#file-input').click(); return; }
+
+    const open = e.target.closest('[data-file-open]');
+    const dl = e.target.closest('[data-file-save]');
+    const del = e.target.closest('[data-file-del]');
+    const id = (open || dl || del) && (open || dl || del).getAttribute(
+      open ? 'data-file-open' : dl ? 'data-file-save' : 'data-file-del');
+    if (!id) return;
+
+    if (del) {
+      const f = docFiles(doc).find((x) => x.id === id);
+      if (!confirm('Удалить файл «' + (f ? f.name : '') + '»?')) return;
+      fileDel(id).catch(() => null).then(() => {
+        doc.files = docFiles(doc).filter((x) => x.id !== id);
+        save(); paint();
+      });
+      return;
+    }
+    const meta = docFiles(doc).find((x) => x.id === id);
+    fileGet(id).then((blob) => {
+      if (!blob) { alert('Файл не найден в хранилище — возможно, он был удалён.'); return; }
+      openBlob(blob, meta && meta.name, !!dl);
+    }).catch((e) => alert('Не удалось прочитать файл: ' + e.message));
+  });
+
+  back.addEventListener('change', (e) => {
+    if (e.target.id === 'file-input') { addFiles(e.target.files); e.target.value = ''; return; }
+    const sign = e.target.closest('[data-sign]');
+    if (sign) {
+      const f = docFiles(doc).find((x) => x.id === sign.getAttribute('data-sign'));
+      if (f) { f.signed = sign.value; save(); }
+    }
+  });
+
+  /* Перетаскивание: гасим поведение браузера, иначе он просто откроет
+     файл поверх страницы и работа потеряется */
+  const drop = back.querySelector('#drop');
+  ['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => {
+    e.preventDefault(); drop.classList.add('drop--over');
+  }));
+  ['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => {
+    e.preventDefault(); drop.classList.remove('drop--over');
+  }));
+  drop.addEventListener('drop', (e) => addFiles(e.dataTransfer && e.dataTransfer.files));
+  drop.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); back.querySelector('#file-input').click(); }
+  });
+
+  document.body.appendChild(back);
+  paint();
+}
+
+/* ------------------------------------------------------------------ */
 /* Навигация                                                          */
 /* ------------------------------------------------------------------ */
 function navHTML() {
@@ -408,7 +577,25 @@ function viewDash() {
     }))
   })).sort((a, b) => b.parts.reduce((s, p) => s + p.value, 0) - a.parts.reduce((s, p) => s + p.value, 0));
 
+  /* Три доли, которые спрашивают первыми: сколько из заказанного оплачено,
+     насколько закрыт график и чем платят. */
+  const ordersAll = d.orders.reduce((s2, o) => s2 + orderTotal(o), 0);
+  const paidAll = sum(d.payments);
+  const schedAll = sum(d.schedule, 'amount');
+  const schedDone = sum(d.schedule.filter((x) => x.status === 'paid'), 'amount');
+  const bankAll = sum(d.payments.filter((p) => p.method === 'bank'));
+  const ringItems = [
+    { value: paidAll, max: ordersAll, label: 'Оплачено от заказов',
+      sub: fmtMoney(paidAll) + ' из ' + fmtMoney(ordersAll), color: 'var(--c1)' },
+    { value: schedDone, max: schedAll, label: 'График закрыт',
+      sub: fmtMoney(schedAll - schedDone) + ' осталось', color: 'var(--glow)' },
+    { value: bankAll, max: paidAll, label: 'Доля безнала',
+      sub: fmtMoney(paidAll - bankAll) + ' налом', color: 'var(--c2)' }
+  ];
+
   return '<div class="kpi-grid">' + kpis + '</div>' +
+    card('Как идут расчёты', chartSlot('ch-dash-rings', (host) => ringGauge(host, ringItems)),
+      { note: 'Точные суммы — под каждым кольцом и в таблицах разделов.' }) +
     card('Оплаты по месяцам — нал и безнал',
       chartSlot('ch-dash-pay', (host) => stackedBars(host, { labels: payMonths, series: seriesMethod }),
         seriesTable(payMonths, seriesMethod)),
@@ -488,19 +675,19 @@ function docTable(rows, opts) {
      остальное — в полной истории документов контрагента */
   if (o.compact) {
     return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
-      '<th>Дата</th><th>Тип</th><th>Номер</th><th>Договор</th><th class="num">Сумма</th><th>Статус</th>' +
+      '<th>Дата</th><th>Тип</th><th>Номер</th><th>Договор</th><th class="num">Сумма</th><th>Скан</th>' +
       '</tr></thead><tbody>' + rows.map((x) => '<tr>' +
         '<td class="nowrap">' + fmtDate(x.date) + '</td>' +
         '<td class="nowrap">' + esc(DOC_TYPES[x.type] || x.type) + '</td>' +
         '<td class="nowrap">' + esc(x.number || '—') + '</td>' +
         '<td>' + contractTag(x.cpId, x.contractId) + '</td>' +
         '<td class="num">' + (Number(x.amount) ? fmtMoney(x.amount) : '<span class="hint">—</span>') + '</td>' +
-        '<td>' + docTag(x.status) + '</td></tr>').join('') +
+        '<td class="nowrap">' + clipHTML(x) + '</td></tr>').join('') +
       '</tbody></table></div>';
   }
   return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
     '<th>Дата</th><th>Тип</th><th>Номер</th>' + (o.hideCp ? '' : '<th>Контрагент</th>') +
-    '<th>Договор</th><th>Заказ</th><th class="num">Сумма</th><th>Статус</th><th>Комментарий</th><th></th>' +
+    '<th>Договор</th><th>Заказ</th><th class="num">Сумма</th><th>Статус</th><th>Скан</th><th>Комментарий</th><th></th>' +
     '</tr></thead><tbody>' +
     rows.map((x) => '<tr>' +
       '<td class="nowrap">' + fmtDate(x.date) + '</td>' +
@@ -511,12 +698,16 @@ function docTable(rows, opts) {
       '<td class="nowrap">' + (x.orderId ? esc(orderLabel(x.orderId)) : '<span class="hint">—</span>') + '</td>' +
       '<td class="num">' + (Number(x.amount) ? fmtMoney(x.amount) : '<span class="hint">—</span>') + '</td>' +
       '<td>' + docTag(x.status) + '</td>' +
+      '<td class="nowrap">' + clipHTML(x) + '</td>' +
       '<td>' + esc(x.note || '') + '</td>' +
-      '<td><button class="btn btn--sm" data-act="doc-edit" data-id="' + esc(x.id) + '" type="button">Правка</button></td>' +
+      '<td><div class="row-actions">' +
+        '<button class="btn btn--sm btn--primary" data-act="doc-files" data-id="' + esc(x.id) + '" type="button">Файлы</button>' +
+        '<button class="btn btn--sm" data-act="doc-edit" data-id="' + esc(x.id) + '" type="button">Правка</button>' +
+      '</div></td>' +
       '</tr>').join('') +
     '</tbody><tfoot><tr><td colspan="' + (o.hideCp ? 5 : 6) + '">Итого ' + rows.length + ' ' +
     plural(rows.length, 'документ', 'документа', 'документов') + '</td>' +
-    '<td class="num">' + fmtMoney(sum(rows, 'amount')) + '</td><td colspan="3"></td></tr></tfoot></table></div>';
+    '<td class="num">' + fmtMoney(sum(rows, 'amount')) + '</td><td colspan="4"></td></tr></tfoot></table></div>';
 }
 
 /* ------------------------------------------------------------------ */
@@ -638,7 +829,21 @@ function cpSummary(c) {
 
   const docs = docsOf({ cpId: c.id }).slice(0, 6);
 
+  const ordersSum = orders.reduce((s2, o) => s2 + orderTotal(o), 0);
+  const bankSum = sum(pays.filter((p) => p.method === 'bank'));
+  const closed = orders.filter((o) => o.status === 'closed').length;
+  const cpRings = [
+    { value: bal.paid, max: bal.invoiced, label: 'Оплачено от выставленного',
+      sub: fmtMoney(bal.paid) + ' из ' + fmtMoney(bal.invoiced), color: 'var(--c1)' },
+    { value: bankSum, max: bal.paid, label: 'Доля безнала',
+      sub: fmtMoney(bal.paid - bankSum) + ' налом', color: 'var(--c2)' },
+    { value: closed, max: orders.length, label: 'Заказы закрыты',
+      center: closed + ' / ' + orders.length,
+      sub: fmtMoney(ordersSum) + ' всего', color: 'var(--glow)' }
+  ];
+
   return '<div class="kpi-grid">' + kpis + '</div>' +
+    card('Как идут расчёты', chartSlot('ch-cp-rings', (host) => ringGauge(host, cpRings))) +
     card('Расчёты по договорам',
       c.contracts.length ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
         '<th>Договор</th><th>Реквизиты</th><th class="num">Выставлено</th><th class="num">Безнал</th>' +
@@ -661,7 +866,8 @@ function cpSummary(c) {
 
 function cpDocs(c) {
   const types = [['', 'Все типы']].concat(Object.keys(DOC_TYPES).map((k) => [k, DOC_TYPES[k]]));
-  const rows = docsOf({ cpId: c.id, contractId: filters.contractId, type: filters.status, from: filters.from, to: filters.to });
+  const rows = filterByScan(docsOf({ cpId: c.id, contractId: filters.contractId, type: filters.status,
+                                    from: filters.from, to: filters.to }));
   const byType = Object.keys(DOC_TYPES).map((t, i) => ({
     label: DOC_TYPES[t],
     parts: [{ label: DOC_TYPES[t], color: 'var(--c' + ((i % 4) + 1) + ')',
@@ -672,11 +878,13 @@ function cpDocs(c) {
       '<label class="field"><span>Договор</span><select data-filter="contractId">' +
         selectOptions(contractOptions(c.id, true), filters.contractId) + '</select></label>' +
       '<label class="field"><span>Тип</span><select data-filter="status">' + selectOptions(types, filters.status) + '</select></label>' +
+      '<label class="field"><span>Скан</span><select data-filter="scan">' + selectOptions(SCAN_OPTIONS, filters.scan) + '</select></label>' +
       '<label class="field"><span>С даты</span><input type="date" data-filter="from" value="' + esc(filters.from) + '"></label>' +
       '<label class="field"><span>По дату</span><input type="date" data-filter="to" value="' + esc(filters.to) + '"></label>' +
       '<button class="btn" data-act="filters-reset" type="button">Сбросить</button>' +
       '<button class="btn btn--primary" data-act="doc-new" data-cp="' + esc(c.id) + '" type="button">+ Документ</button>' +
     '</div>' +
+    '<div class="kpi-grid">' + docScanKPIs(rows) + '</div>' +
     card('История документов — ' + c.name, docTable(rows, { hideCp: true }),
       { flush: true, note: 'Счёт, спецификация, оплата, УПД и акт одной лентой: видно, что уже выпущено, а что ещё нет.' }) +
     (byType.length ? card('Суммы по типам документов', chartSlot('ch-cp-doctype', (host) => hBars(host, byType))) : '');
@@ -1000,23 +1208,53 @@ function viewPayments() {
     card('Фактические оплаты', payTable(rows), { flush: true });
 }
 
+/* Отбор по состоянию скана: «без скана», «есть, но не подписан обеими»
+   и «подписан обеими». Третий вариант — то, что обычно и ищут. */
+function filterByScan(rows) {
+  if (!filters.scan) return rows;
+  return rows.filter((d) => {
+    const st = docSignState(d);
+    if (filters.scan === 'none') return st.key === 'empty';
+    if (filters.scan === 'both') return st.key === 'both';
+    return st.key === 'none' || st.key === 'one';
+  });
+}
+
+const SCAN_OPTIONS = [['', 'Любой скан'], ['both', 'Подписан обеими'],
+                      ['unsigned', 'Есть, но не подписан'], ['none', 'Без скана']];
+
+function docScanKPIs(rows) {
+  const withScan = rows.filter((d) => docSignState(d).count);
+  const both = rows.filter((d) => docSignState(d).key === 'both');
+  return kpi('Документов', String(rows.length), 'по текущему фильтру') +
+    kpi('Со сканом', String(withScan.length),
+        rows.length ? fmtPct(withScan.length / rows.length * 100) + ' от всех' : '') +
+    kpi('Подписано обеими', String(both.length),
+        rows.length ? fmtPct(both.length / rows.length * 100) + ' от всех' : '', both.length ? 'kpi--up' : '') +
+    kpi('Без скана', String(rows.length - withScan.length), 'нечего приложить к оплате',
+        rows.length - withScan.length ? 'kpi--warn' : '');
+}
+
 /* ------------------------------------------------------------------ */
 /* Документы (общий раздел)                                           */
 /* ------------------------------------------------------------------ */
 function viewDocs() {
   const types = [['', 'Все типы']].concat(Object.keys(DOC_TYPES).map((k) => [k, DOC_TYPES[k]]));
-  const rows = docsOf({ cpId: filters.cpId, contractId: filters.contractId, type: filters.status,
-                        from: filters.from, to: filters.to });
+  const rows = filterByScan(docsOf({ cpId: filters.cpId, contractId: filters.contractId, type: filters.status,
+                        from: filters.from, to: filters.to }));
   return '<div class="filters">' +
       '<label class="field"><span>Контрагент</span><select data-filter="cpId">' + selectOptions(cpOptions(true), filters.cpId) + '</select></label>' +
       '<label class="field"><span>Договор</span><select data-filter="contractId">' + selectOptions(contractOptions(filters.cpId, true), filters.contractId) + '</select></label>' +
       '<label class="field"><span>Тип</span><select data-filter="status">' + selectOptions(types, filters.status) + '</select></label>' +
+      '<label class="field"><span>Скан</span><select data-filter="scan">' + selectOptions(SCAN_OPTIONS, filters.scan) + '</select></label>' +
       '<label class="field"><span>С даты</span><input type="date" data-filter="from" value="' + esc(filters.from) + '"></label>' +
       '<label class="field"><span>По дату</span><input type="date" data-filter="to" value="' + esc(filters.to) + '"></label>' +
       '<button class="btn" data-act="filters-reset" type="button">Сбросить</button>' +
       '<button class="btn btn--primary" data-act="doc-new" type="button">+ Документ</button>' +
     '</div>' +
-    card('Все документы', docTable(rows), { flush: true });
+    '<div class="kpi-grid">' + docScanKPIs(rows) + '</div>' +
+    card('Все документы', docTable(rows), { flush: true,
+      note: 'Кнопка «Файлы» в строке открывает вложения: туда складывают неподписанный экземпляр и подписанный с обеих сторон.' });
 }
 
 /* ------------------------------------------------------------------ */
@@ -1157,13 +1395,15 @@ function viewCps() {
 /* ------------------------------------------------------------------ */
 function viewData() {
   const d = db();
+  const fileCount = allFileIds().length;
   const counts = [
     ['Контрагенты', d.counterparties.length],
     ['Договоры', allContracts().length],
     ['Заказы', d.orders.length],
     ['Документы', d.documents.length],
     ['Оплаты', d.payments.length],
-    ['Строки графика', d.schedule.length]
+    ['Строки графика', d.schedule.length],
+    ['Вложенные файлы', fileCount]
   ];
   return card('Что сейчас в базе',
     '<div class="kpi-grid" style="margin:0">' + counts.map((c) => kpi(c[0], String(c[1]), '')).join('') + '</div>') +
@@ -1171,18 +1411,26 @@ function viewData() {
       '<p class="hint" style="margin-top:0">Данные лежат в этом браузере на этом устройстве. Чтобы перенести их на другой ' +
       'компьютер или телефон — выгрузите файл и загрузите его там. Файл обычный JSON, его можно хранить в облаке как резервную копию.</p>' +
       '<div class="row-actions" style="margin-top:12px">' +
-        '<button class="btn btn--primary" data-act="export" type="button">Выгрузить в файл</button>' +
+        '<button class="btn btn--primary" data-act="export" type="button">Выгрузить данные</button>' +
+        '<button class="btn" data-act="export-files" type="button">Выгрузить вместе со сканами</button>' +
         '<button class="btn" data-act="import-replace" type="button">Загрузить из файла (заменить)</button>' +
         '<button class="btn" data-act="import-merge" type="button">Загрузить и добавить к текущим</button>' +
         '<button class="btn" data-act="print" type="button">Печать текущего экрана</button>' +
       '</div>' +
+      '<p class="hint" style="margin-bottom:0">Обычная выгрузка — только записи, она небольшая. ' +
+      'Выгрузка со сканами вкладывает и сами PDF, файл получается во столько же раз тяжелее — ' +
+      'это полная копия, которой поднимается работа на другом устройстве. ' +
+      'Сейчас в хранилище <b id="files-size">считаем…</b>.</p>' +
       '<input type="file" id="import-file" accept=".json,application/json" hidden>') +
     card('Очистка',
       '<p class="hint" style="margin-top:0">Перед очисткой выгрузите файл — восстановить удалённое иначе не получится.</p>' +
       '<div class="row-actions" style="margin-top:12px">' +
+        '<button class="btn" data-act="files-cleanup" type="button">Убрать забытые файлы</button>' +
         '<button class="btn btn--danger" data-act="reset-empty" type="button">Очистить всё и начать с нуля</button>' +
         '<button class="btn btn--danger" data-act="reset-sample" type="button">Вернуть демонстрационный пример</button>' +
-      '</div>');
+      '</div>' +
+      '<p class="hint" style="margin-bottom:0">Забытые файлы — это вложения документов, которые удалили в обход ' +
+      'платформы, например загрузкой чужой копии данных. Записи они не трогают, только освобождают место.</p>');
 }
 
 /* ------------------------------------------------------------------ */
@@ -1312,8 +1560,11 @@ function formDocument(docId, preset) {
         options: Object.keys(DOC_STATUSES).map((k) => [k, DOC_STATUSES[k].label]) },
       { name: 'note', label: 'Комментарий', type: 'textarea', value: x && x.note, wide: true }
     ],
-    onSave: (v) => { upsert('documents', x ? Object.assign({}, v, { id: x.id }) : v, 'doc'); },
-    onDelete: x ? () => remove('documents', x.id) : null
+    onSave: (v) => {
+      /* Вложения остаются при документе: форма их не трогает */
+      upsert('documents', x ? Object.assign({}, v, { id: x.id, files: docFiles(x) }) : Object.assign(v, { files: [] }), 'doc');
+    },
+    onDelete: x ? () => removeDocument(x.id) : null
   });
 }
 
@@ -1362,6 +1613,15 @@ function render() {
     const host = document.getElementById(job.id);
     if (host) job.draw(host);
   });
+
+  /* Вес хранилища файлов читается из IndexedDB, то есть не сразу —
+     подставляем, когда ответ придёт, и только если экран ещё тот же */
+  const sizeBox = document.getElementById('files-size');
+  if (sizeBox) {
+    filesTotalSize()
+      .then((bytes) => { if (sizeBox.isConnected) sizeBox.textContent = fmtSize(bytes); })
+      .catch(() => { if (sizeBox.isConnected) sizeBox.textContent = 'нет доступа'; });
+  }
 }
 
 /* Перерисовка графиков при смене темы: цвета берутся из CSS-переменных,
@@ -1375,7 +1635,7 @@ function downloadFile(name, text, type) {
   const blob = new Blob([text], { type: type || 'application/json;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = name;
+  a.href = url; a.download = asciiFileName(name, 'export.json');
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
@@ -1386,7 +1646,7 @@ function handleAction(act, node) {
 
   switch (act) {
     case 'filters-reset':
-      filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '' };
+      filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '', scan: '' };
       render(); return;
 
     case 'toggle-table': {
@@ -1426,6 +1686,7 @@ function handleAction(act, node) {
     }
     case 'doc-new': formDocument('', { cpId: cp }); return;
     case 'doc-edit': formDocument(id); return;
+    case 'doc-files': openFilesModal(id); return;
 
     /* Заказы */
     case 'order-new': newOrder(cp); return;
@@ -1487,8 +1748,24 @@ function handleAction(act, node) {
 
     /* Данные */
     case 'export': {
-      const stamp = today();
-      downloadFile('платформа-продаж-' + stamp + '.json', exportJSON());
+      downloadFile('платформа-продаж-' + today() + '.json', exportJSON());
+      return;
+    }
+    case 'export-files': {
+      node.disabled = true;
+      const was = node.textContent;
+      node.textContent = 'Собираем…';
+      exportWithFiles().then((text) => {
+        downloadFile('платформа-продаж-со-сканами-' + today() + '.json', text);
+      }).catch((e) => alert('Не удалось собрать выгрузку: ' + e.message))
+        .then(() => { node.disabled = false; node.textContent = was; });
+      return;
+    }
+    case 'files-cleanup': {
+      filesCleanup(allFileIds()).then((n) => {
+        alert(n ? 'Убрано файлов: ' + n : 'Забытых файлов нет — всё на месте.');
+        render();
+      }).catch((e) => alert('Не удалось почистить хранилище: ' + e.message));
       return;
     }
     case 'import-replace':
@@ -1500,9 +1777,11 @@ function handleAction(act, node) {
         const reader = new FileReader();
         reader.onload = () => {
           try {
-            importJSON(String(reader.result), act === 'import-merge' ? 'merge' : 'replace');
-            alert('Данные загружены.');
-            go('dash');
+            const done = importJSON(String(reader.result), act === 'import-merge' ? 'merge' : 'replace');
+            Promise.resolve(done).then((n) => {
+              alert(n ? 'Данные загружены, восстановлено файлов: ' + n : 'Данные загружены.');
+              go('dash');
+            });
           } catch (e) {
             alert('Не удалось прочитать файл: ' + e.message);
           }
@@ -1515,10 +1794,16 @@ function handleAction(act, node) {
     }
     case 'print': window.print(); return;
     case 'reset-empty':
-      if (confirm('Удалить все данные без возможности восстановления?')) { resetAll(false); go('dash'); }
+      if (confirm('Удалить все данные и вложенные файлы без возможности восстановления?')) {
+        resetAll(false);
+        filesCleanup([]).catch(() => null).then(() => go('dash'));
+      }
       return;
     case 'reset-sample':
-      if (confirm('Заменить текущие данные демонстрационным примером?')) { resetAll(true); go('dash'); }
+      if (confirm('Заменить текущие данные демонстрационным примером? Вложенные файлы будут удалены.')) {
+        resetAll(true);
+        filesCleanup([]).catch(() => null).then(() => go('dash'));
+      }
       return;
 
     default: return;
@@ -1528,48 +1813,37 @@ function handleAction(act, node) {
 /* ------------------------------------------------------------------ */
 /* Запуск                                                             */
 /* ------------------------------------------------------------------ */
-/* Мордочка тигра — знак платформы. Рисуется прямо в разметке, а не берётся
-   картинкой: один и тот же контур идёт и в значок вкладки, и в шапку, а на
-   16 пикселях остаётся узнаваемым, потому что всё держится на крупных
-   пятнах — ушах, полосах лба и светлой морде. */
-function tigerSVG(fur, stripe, muzzle, ink, warm) {
+/* Знак платформы — пара крыльев. Рисуется прямо в разметке, а не берётся
+   картинкой: один контур идёт и в значок вкладки, и в шапку. Форма держится
+   на двух серпах с острыми концами, поэтому узнаётся и на 16 пикселях.
+   Идентификаторы градиента и фильтра уникальны: иначе два экземпляра на
+   одной странице подхватили бы чужую заливку. */
+function wingsSVG(key, top, bottom, glow) {
+  const g = 'wg-' + key;
   return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
-    /* уши */
-    '<circle cx="13" cy="17" r="9.5" fill="' + fur + '"/>' +
-    '<circle cx="51" cy="17" r="9.5" fill="' + fur + '"/>' +
-    '<circle cx="13" cy="18" r="4.6" fill="' + warm + '"/>' +
-    '<circle cx="51" cy="18" r="4.6" fill="' + warm + '"/>' +
-    /* голова с бакенбардами по бокам */
-    '<path d="M32 11 C46 11 57 19 57 32 L61.5 36 L54.5 40 L60 45.5 L51.5 48.5 ' +
-      'C49 55.5 41 60.5 32 60.5 C23 60.5 15 55.5 12.5 48.5 L4 45.5 L9.5 40 L2.5 36 L7 32 ' +
-      'C7 19 18 11 32 11 Z" fill="' + fur + '"/>' +
-    /* полосы лба */
-    '<path d="M32 13 L32 22" stroke="' + stripe + '" stroke-width="3.8" stroke-linecap="round"/>' +
-    '<path d="M26 15 L25 27" stroke="' + stripe + '" stroke-width="4.2" stroke-linecap="round"/>' +
-    '<path d="M38 15 L39 27" stroke="' + stripe + '" stroke-width="4.2" stroke-linecap="round"/>' +
-    '<path d="M18 20 L20 30" stroke="' + stripe + '" stroke-width="3.8" stroke-linecap="round"/>' +
-    '<path d="M46 20 L44 30" stroke="' + stripe + '" stroke-width="3.8" stroke-linecap="round"/>' +
-    /* полосы щёк */
-    '<path d="M7 36 L18 37.5" stroke="' + stripe + '" stroke-width="3.8" stroke-linecap="round"/>' +
-    '<path d="M9 44.5 L19 43.5" stroke="' + stripe + '" stroke-width="3.6" stroke-linecap="round"/>' +
-    '<path d="M57 36 L46 37.5" stroke="' + stripe + '" stroke-width="3.8" stroke-linecap="round"/>' +
-    '<path d="M55 44.5 L45 43.5" stroke="' + stripe + '" stroke-width="3.6" stroke-linecap="round"/>' +
-    /* морда, глаза, нос */
-    '<ellipse cx="26.5" cy="48" rx="7" ry="5.8" fill="' + muzzle + '"/>' +
-    '<ellipse cx="37.5" cy="48" rx="7" ry="5.8" fill="' + muzzle + '"/>' +
-    '<circle cx="23.5" cy="34.5" r="4.2" fill="' + ink + '"/>' +
-    '<circle cx="40.5" cy="34.5" r="4.2" fill="' + ink + '"/>' +
-    '<path d="M27.5 42.5 Q32 39.5 36.5 42.5 Q32 47.5 27.5 42.5 Z" fill="' + warm + '"/>' +
-    '<path d="M32 46 L32 48.5" stroke="' + ink + '" stroke-width="2.2" stroke-linecap="round"/>' +
-    '</svg>';
+    '<defs>' +
+      '<linearGradient id="' + g + '" x1="32" y1="8" x2="32" y2="58" gradientUnits="userSpaceOnUse">' +
+        '<stop offset="0" stop-color="' + top + '"/><stop offset="1" stop-color="' + bottom + '"/>' +
+      '</linearGradient>' +
+      (glow
+        ? '<filter id="f-' + g + '" x="-55%" y="-55%" width="210%" height="210%">' +
+            '<feGaussianBlur stdDeviation="3.2" result="b"/>' +
+            '<feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>' +
+          '</filter>'
+        : '') +
+    '</defs>' +
+    '<g fill="url(#' + g + ')"' + (glow ? ' filter="url(#f-' + g + ')"' : '') + '>' +
+      '<path d="M33.2 58 C36 34 44 17 61 12.5 C50 24 40 40 33.2 58 Z"/>' +
+      '<path d="M30.8 58 C28 34 20 17 3 12.5 C14 24 24 40 30.8 58 Z"/>' +
+    '</g></svg>';
 }
 
-/* Светлая мордочка — для тёмной темы, тёмная — для светлой: знак всегда
-   контрастен тому, на чём лежит. Оранжевый нос и уши одинаковы в обеих. */
-function tigerFor(theme) {
+/* На тёмной теме крылья светятся холодной синью, на светлой — плотный
+   тёмно-синий без свечения: на белом ореол читается грязью. */
+function logoFor(theme) {
   return theme === 'light'
-    ? tigerSVG('#18233a', '#eaf0f9', '#44567f', '#eaf0f9', '#e07a55')   /* тёмная мордочка */
-    : tigerSVG('#edd2a3', '#22304b', '#fffdf8', '#22304b', '#dd6f46');  /* светлая мордочка */
+    ? wingsSVG('l', '#34506d', '#0a1b2e', false)
+    : wingsSVG('d', '#7fd9ff', '#1b6fe0', true);
 }
 
 function applyTheme(theme) {
@@ -1581,9 +1855,8 @@ function applyTheme(theme) {
     btn.title = theme === 'light' ? 'Тёмная тема' : 'Светлая тема';
   }
 
-  /* Для светлой темы знак рисуется тёмной мордочкой, и наоборот: вкладка
-     браузера и шапка берут один и тот же контур. */
-  const svg = tigerFor(theme);
+  /* Вкладка браузера и шапка берут один и тот же контур. */
+  const svg = logoFor(theme);
   const logo = document.getElementById('logo');
   if (logo) logo.innerHTML = svg;
   const icon = document.getElementById('favicon');

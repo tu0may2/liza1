@@ -58,6 +58,31 @@ function barPath(x, y, w, h, r) {
          ' L' + (x + w) + ' ' + (y + h) + ' Z';
 }
 
+/* Свечение и градиенты объявляются по месту — у каждого графика свои,
+   потому что идентификаторы в SVG общие на весь документ и два графика с
+   одинаковыми именами подхватили бы чужую заливку. */
+let defsSeq = 0;
+function defsId(prefix) { defsSeq += 1; return prefix + '-' + defsSeq; }
+
+function addGlow(svg, id, strength) {
+  const defs = el('defs', null, svg);
+  const f = el('filter', { id: id, x: '-30%', y: '-30%', width: '160%', height: '160%' }, defs);
+  el('feGaussianBlur', { stdDeviation: strength || 3, result: 'b' }, f);
+  const merge = el('feMerge', null, f);
+  el('feMergeNode', { in: 'b' }, merge);
+  el('feMergeNode', { in: 'SourceGraphic' }, merge);
+  return defs;
+}
+
+/* Вертикальный градиент от цвета серии к прозрачности — заливка площади
+   под линией. Она не несёт своего значения, только помогает глазу
+   проследить линию, поэтому держится слабой. */
+function addFade(defs, id, color) {
+  const g = el('linearGradient', { id: id, x1: '0', y1: '0', x2: '0', y2: '1' }, defs);
+  el('stop', { offset: '0', 'stop-color': color, 'stop-opacity': '0.30' }, g);
+  el('stop', { offset: '1', 'stop-color': color, 'stop-opacity': '0' }, g);
+}
+
 function tipBox(host) {
   let tip = host.querySelector('.chart-tip');
   if (!tip) {
@@ -116,6 +141,8 @@ function stackedBars(host, opts) {
 
   const svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, width: W, height: H, role: 'img',
     'aria-label': opts.aria || 'Столбчатая диаграмма по периодам' }, host);
+  const glowId = defsId('glow');
+  addGlow(svg, glowId, 2.2);
 
   ticks.forEach((t) => {
     el('line', { class: 'grid-line', x1: padL, x2: W - padR, y1: yOf(t), y2: yOf(t) }, svg);
@@ -137,7 +164,8 @@ function stackedBars(host, opts) {
       const h = (o.v / top) * plotH;
       const y = yOf(acc + o.v);
       const isTop = k === nonEmpty.length - 1;
-      el('path', { class: 'seg', d: barPath(x, y, barW, h, isTop ? 4 : 0), fill: s.color }, svg);
+      el('path', { class: 'seg', d: barPath(x, y, barW, h, isTop ? 4 : 0), fill: s.color,
+        filter: isTop ? 'url(#' + glowId + ')' : '' }, svg);
       acc += o.v;
     });
 
@@ -198,6 +226,14 @@ function lineChart(host, opts) {
   const svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, width: W, height: H, role: 'img',
     'aria-label': opts.aria || 'Линейный график по периодам' }, host);
 
+  const glowId = defsId('glow');
+  const defs = addGlow(svg, glowId, 2.6);
+  const fadeIds = series.map((ser) => {
+    const id = defsId('fade');
+    addFade(defs, id, ser.color);
+    return id;
+  });
+
   ticks.forEach((t) => {
     el('line', { class: 'grid-line', x1: padL, x2: W - padR, y1: yOf(t), y2: yOf(t) }, svg);
     const tx = el('text', { x: padL - 8, y: yOf(t) + 4, 'text-anchor': 'end' }, svg);
@@ -207,11 +243,21 @@ function lineChart(host, opts) {
 
   const cross = el('line', { class: 'crosshair', y1: padT, y2: padT + plotH, x1: padL, x2: padL }, svg);
 
-  series.forEach((s) => {
-    const d = s.values.map((v, i) => (i ? 'L' : 'M') + xOf(i) + ' ' + yOf(Number(v) || 0)).join(' ');
-    el('path', { class: 'line', d: d, stroke: s.color, 'stroke-dasharray': s.dashed ? '5 4' : '' }, svg);
+  series.forEach((s, si) => {
+    const pts = s.values.map((v, i) => xOf(i) + ' ' + yOf(Number(v) || 0));
+    const d = pts.map((pt, i) => (i ? 'L' : 'M') + pt).join(' ');
+    /* Площадь под сплошной линией: пунктир — это план, его не заливаем,
+       иначе план визуально весил бы столько же, сколько факт */
+    if (!s.dashed) {
+      el('path', { d: d + ' L' + xOf(s.values.length - 1) + ' ' + yOf(0) + ' L' + xOf(0) + ' ' + yOf(0) + ' Z',
+        fill: 'url(#' + fadeIds[si] + ')', stroke: 'none' }, svg);
+    }
+    el('path', { class: 'line', d: d, stroke: s.color,
+      'stroke-dasharray': s.dashed ? '5 4' : '', filter: s.dashed ? '' : 'url(#' + glowId + ')' }, svg);
     s.values.forEach((v, i) => {
-      el('circle', { class: 'dot', cx: xOf(i), cy: yOf(Number(v) || 0), r: 4.5, fill: s.color }, svg);
+      const last = i === s.values.length - 1;
+      el('circle', { class: 'dot', cx: xOf(i), cy: yOf(Number(v) || 0), r: last ? 5.5 : 4.5,
+        fill: s.color, filter: last ? 'url(#' + glowId + ')' : '' }, svg);
     });
   });
 
@@ -291,4 +337,53 @@ function seriesTable(labels, series, fmt) {
       series.map((s) => '<td class="num">' + f(Number(s.values[i]) || 0) + '</td>').join('') +
       (series.length > 1 ? '<td class="num">' + f(sums[i]) + '</td>' : '') + '</tr>').join('') +
     '</tbody></table></div>';
+}
+
+/* ------------------------------------------------------------------ */
+/* Кольцевой показатель                                                */
+/* ------------------------------------------------------------------ */
+/* Доля одного значения от целого: круг читается быстрее полосы, когда
+   важно не точное число, а «много или мало». Точное значение стоит в
+   середине цифрами, поэтому угол никто не измеряет на глаз.
+   rings: [{ value, max, center, label, sub, color }] */
+function ringGauge(host, items) {
+  host.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'rings';
+  host.appendChild(wrap);
+
+  items.forEach((it) => {
+    const max = Number(it.max) || 0;
+    const value = Math.max(0, Number(it.value) || 0);
+    const pct = max > 0 ? Math.min(1, value / max) : 0;
+    const R = 54, C = 2 * Math.PI * R, SW = 13;
+
+    const box = document.createElement('div');
+    box.className = 'ring';
+    wrap.appendChild(box);
+
+    const svg = el('svg', { viewBox: '0 0 140 140', width: 140, height: 140, role: 'img',
+      'aria-label': it.label + ': ' + (it.center || Math.round(pct * 100) + '%') }, box);
+    const glowId = defsId('glow');
+    addGlow(svg, glowId, 3);
+
+    /* Дорожка кольца и значение поверх неё, оба с круглыми торцами */
+    el('circle', { class: 'ring__track', cx: 70, cy: 70, r: R, fill: 'none', 'stroke-width': SW }, svg);
+    if (pct > 0) {
+      el('circle', { cx: 70, cy: 70, r: R, fill: 'none', stroke: it.color || 'var(--glow)',
+        'stroke-width': SW, 'stroke-linecap': 'round',
+        'stroke-dasharray': (C * pct) + ' ' + C,
+        transform: 'rotate(-90 70 70)', filter: 'url(#' + glowId + ')' }, svg);
+    }
+    /* Цвет и начертание задаёт таблица стилей: переменные CSS в атрибутах
+       SVG разрешаются не везде, а значение в середине кольца — главное,
+       что здесь читают. */
+    const center = el('text', { class: 'ring__value', x: 70, y: 70,
+      'text-anchor': 'middle', 'dominant-baseline': 'central' }, svg);
+    center.textContent = it.center == null ? Math.round(pct * 100) + '%' : it.center;
+
+    box.insertAdjacentHTML('beforeend',
+      '<div class="ring__label">' + esc(it.label) + '</div>' +
+      (it.sub ? '<div class="ring__sub">' + esc(it.sub) + '</div>' : ''));
+  });
 }

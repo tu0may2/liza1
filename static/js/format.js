@@ -101,3 +101,33 @@ function esc(s) {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
+
+/* Имя скачиваемого файла.
+
+   Когда страницу открыли прямо из файла, браузер не принимает в имени
+   ничего, кроме латиницы: кириллическое имя он молча отбрасывает целиком,
+   и файл сохраняется как «download» без расширения. Поэтому для самой
+   загрузки имя переводится в латиницу, а на экране остаётся как есть. */
+const TRANSLIT = {
+  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i',
+  й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't',
+  у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '',
+  э: 'e', ю: 'yu', я: 'ya'
+};
+
+function translit(text) {
+  return String(text == null ? '' : text).split('').map((ch) => {
+    const lower = ch.toLowerCase();
+    const mapped = TRANSLIT[lower];
+    if (mapped == null) return ch;
+    return ch === lower ? mapped : (mapped.charAt(0).toUpperCase() + mapped.slice(1));
+  }).join('');
+}
+
+function asciiFileName(name, fallback) {
+  const ascii = translit(name)
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-|-$/g, '');
+  return ascii || (fallback || 'file');
+}

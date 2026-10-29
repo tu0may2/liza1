@@ -46,6 +46,14 @@ const DOC_STATUSES = {
   rejected: { label: 'Отклонён',  tag: 'tag--bad' }
 };
 
+/* Состояние подписания вложенного файла. Главное, что нужно видеть по
+   скану: он уже подписан обеими сторонами или ещё нет. */
+const SIGN_STATES = {
+  none: { label: 'Не подписан',               short: 'не подписан', tag: 'tag--warn' },
+  one:  { label: 'Подписан одной стороной',   short: 'одна сторона', tag: 'tag--info' },
+  both: { label: 'Подписан с обеих сторон',   short: 'обе стороны',  tag: 'tag--ok' }
+};
+
 let state = null;
 
 function uid(prefix) {
@@ -68,6 +76,7 @@ function load() {
     });
     state.counterparties.forEach((c) => { if (!Array.isArray(c.contracts)) c.contracts = []; });
     state.orders.forEach((o) => { if (!Array.isArray(o.items)) o.items = []; });
+    state.documents.forEach((d2) => { if (!Array.isArray(d2.files)) d2.files = []; });
   } catch (e) {
     console.error('Не удалось прочитать сохранённые данные, начинаем с примера', e);
     state = seedState();
@@ -154,6 +163,10 @@ function remove(collection, id) {
    иначе в оплатах и документах остались бы строки без владельца. */
 function removeCounterparty(cpId) {
   const d = db();
+  /* Вложения удаляемых документов тоже вычищаем */
+  const ids = [];
+  d.documents.filter((x) => x.cpId === cpId).forEach((x) => docFiles(x).forEach((f) => ids.push(f.id)));
+  ids.forEach((id) => { try { fileDel(id); } catch (e) { /* хранилище могло не открыться */ } });
   d.counterparties = d.counterparties.filter((c) => c.id !== cpId);
   ['orders', 'documents', 'payments', 'schedule'].forEach((k) => {
     d[k] = d[k].filter((x) => x.cpId !== cpId);
@@ -174,14 +187,74 @@ function removeContract(cpId, contractId) {
 }
 
 /* ---------------------------------------------------------------- */
+/* Вложенные файлы                                                  */
+/* ---------------------------------------------------------------- */
+function docFiles(doc) {
+  if (!doc) return [];
+  if (!Array.isArray(doc.files)) doc.files = [];
+  return doc.files;
+}
+
+/* Сводка по вложениям документа: сколько файлов и подписан ли он.
+   Документ считается подписанным, если хотя бы один скан подписан
+   обеими сторонами — именно такой экземпляр имеет силу. */
+function docSignState(doc) {
+  const list = docFiles(doc);
+  if (!list.length) return { count: 0, key: 'empty', label: 'нет скана' };
+  if (list.some((f) => f.signed === 'both')) return { count: list.length, key: 'both', label: 'подписан обеими' };
+  if (list.some((f) => f.signed === 'one')) return { count: list.length, key: 'one', label: 'одна сторона' };
+  return { count: list.length, key: 'none', label: 'без подписей' };
+}
+
+function allFileIds() {
+  const out = [];
+  db().documents.forEach((d2) => docFiles(d2).forEach((f) => out.push(f.id)));
+  return out;
+}
+
+/* Удаление документа уносит и его вложения: иначе двоичные данные
+   остались бы в хранилище навсегда, без единой ссылки на них. */
+function removeDocument(docId) {
+  const doc = db().documents.find((d2) => d2.id === docId);
+  const ids = doc ? docFiles(doc).map((f) => f.id) : [];
+  remove('documents', docId);
+  return Promise.all(ids.map((id) => fileDel(id).catch(() => null)));
+}
+
+/* ---------------------------------------------------------------- */
 /* Выгрузка и загрузка                                              */
 /* ---------------------------------------------------------------- */
 function exportJSON() { return JSON.stringify(db(), null, 2); }
+
+/* Выгрузка вместе со сканами: файлы переводятся в base64 и кладутся в то
+   же поле, откуда загрузка их и достаёт. Файл получается большим — это
+   полная копия, которой можно поднять работу на другом устройстве. */
+function exportWithFiles() {
+  const snapshot = JSON.parse(JSON.stringify(db()));
+  const metas = [];
+  snapshot.documents.forEach((d2) => (d2.files || []).forEach((f) => metas.push(f)));
+  return Promise.all(metas.map((f) =>
+    fileGet(f.id).then((blob) => (blob ? blobToBase64(blob).then((b64) => [f.id, { type: f.type, b64: b64 }]) : null))
+      .catch(() => null)
+  )).then((pairs) => {
+    snapshot._files = {};
+    pairs.filter(Boolean).forEach((pair) => { snapshot._files[pair[0]] = pair[1]; });
+    return JSON.stringify(snapshot);
+  });
+}
 
 function importJSON(text, mode) {
   const parsed = JSON.parse(text);
   if (!parsed || typeof parsed !== 'object') throw new Error('Файл не похож на выгрузку платформы');
   if (!Array.isArray(parsed.counterparties)) throw new Error('В файле нет списка контрагентов');
+
+  /* Сканы, если они есть в выгрузке, возвращаются в хранилище файлов.
+     Делается это до правки состояния: если файлы не лягут, ссылки на них
+     не появятся и в данных не останется битых вложений. */
+  const blobs = parsed._files || {};
+  delete parsed._files;
+  const restore = Object.keys(blobs).map((id) =>
+    filePut(id, base64ToBlob(blobs[id].b64, blobs[id].type)).catch(() => null));
   if (mode === 'merge') {
     const d = db();
     const known = new Set(d.counterparties.map((c) => c.id));
@@ -193,7 +266,9 @@ function importJSON(text, mode) {
   } else {
     state = Object.assign(blankState(), parsed);
   }
+  state.documents.forEach((d2) => { if (!Array.isArray(d2.files)) d2.files = []; });
   save();
+  return Promise.all(restore).then(() => Object.keys(blobs).length);
 }
 
 function resetAll(withSample) {
@@ -267,25 +342,25 @@ function seedState() {
 
   s.documents = [
     { id: 'doc-1', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: '', type: 'contract',
-      number: 'А-' + y + '/14', date: y + '-01-15', amount: 0, status: 'signed', note: 'Рамочный договор поставки.' },
+      number: 'А-' + y + '/14', date: y + '-01-15', amount: 0, status: 'signed', files: [], note: 'Рамочный договор поставки.' },
     { id: 'doc-2', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: 'ord-1', type: 'spec',
-      number: 'С-114', date: day(-3, 5), amount: 892000, status: 'signed', note: '' },
+      number: 'С-114', date: day(-3, 5), amount: 892000, status: 'signed', files: [], note: '' },
     { id: 'doc-3', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: 'ord-1', type: 'invoice',
-      number: '114', date: day(-3, 6), amount: 892000, status: 'paid', note: 'Оплачен двумя частями.' },
+      number: '114', date: day(-3, 6), amount: 892000, status: 'paid', files: [], note: 'Оплачен двумя частями.' },
     { id: 'doc-4', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: 'ord-1', type: 'upd',
-      number: 'УПД-114', date: day(-3, 18), amount: 892000, status: 'signed', note: '' },
+      number: 'УПД-114', date: day(-3, 18), amount: 892000, status: 'signed', files: [], note: '' },
     { id: 'doc-5', cpId: 'cp-amur', contractId: 'k-amur-barter', orderId: 'ord-2', type: 'contract',
-      number: 'А-' + y + '/14-Б', date: y + '-02-03', amount: 0, status: 'signed', note: 'Бартерный договор.' },
+      number: 'А-' + y + '/14-Б', date: y + '-02-03', amount: 0, status: 'signed', files: [], note: 'Бартерный договор.' },
     { id: 'doc-6', cpId: 'cp-amur', contractId: 'k-amur-barter', orderId: 'ord-2', type: 'spec',
-      number: 'С-118Б', date: day(-2, 9), amount: 465000, status: 'signed', note: 'Перечень встречной поставки.' },
+      number: 'С-118Б', date: day(-2, 9), amount: 465000, status: 'signed', files: [], note: 'Перечень встречной поставки.' },
     { id: 'doc-7', cpId: 'cp-amur', contractId: 'k-amur-barter', orderId: 'ord-2', type: 'invoice',
-      number: '118Б', date: day(-2, 10), amount: 465000, status: 'sent', note: 'Частично закрыт взаимозачётом.' },
+      number: '118Б', date: day(-2, 10), amount: 465000, status: 'sent', files: [], note: 'Частично закрыт взаимозачётом.' },
     { id: 'doc-8', cpId: 'cp-sharks', contractId: 'k-sharks-main', orderId: '', type: 'contract',
-      number: 'СА-' + y + '/07', date: y + '-03-11', amount: 0, status: 'signed', note: '' },
+      number: 'СА-' + y + '/07', date: y + '-03-11', amount: 0, status: 'signed', files: [], note: '' },
     { id: 'doc-9', cpId: 'cp-sharks', contractId: 'k-sharks-main', orderId: 'ord-3', type: 'spec',
-      number: 'С-121', date: day(-1, 12), amount: 522000, status: 'sent', note: 'Ждём подпись.' },
+      number: 'С-121', date: day(-1, 12), amount: 522000, status: 'sent', files: [], note: 'Ждём подпись.' },
     { id: 'doc-10', cpId: 'cp-sharks', contractId: 'k-sharks-main', orderId: 'ord-3', type: 'invoice',
-      number: '121', date: day(-1, 13), amount: 522000, status: 'sent', note: 'Предоплата 50%.' }
+      number: '121', date: day(-1, 13), amount: 522000, status: 'sent', files: [], note: 'Предоплата 50%.' }
   ];
 
   s.payments = [
@@ -308,6 +383,8 @@ function seedState() {
   ];
 
   s.schedule = [
+    { id: 'sch-0', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: 'ord-1', dueDate: day(-2, 10),
+      amount: 392000, method: 'bank', status: 'paid', files: [], note: 'Остаток по счёту 114 — закрыт.' },
     { id: 'sch-1', cpId: 'cp-amur', contractId: 'k-amur-barter', orderId: 'ord-2', dueDate: day(-1, 25),
       amount: 195000, method: 'cash', status: 'plan', note: 'Остаток по бартеру — просрочен.' },
     { id: 'sch-2', cpId: 'cp-sharks', contractId: 'k-sharks-main', orderId: 'ord-3', dueDate: day(0, 20),
