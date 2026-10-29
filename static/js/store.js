@@ -1,11 +1,15 @@
-/* Хранилище. Всё лежит в localStorage браузера одним JSON-документом:
-   платформа работает без сервера и без интернета, файл index.html можно
-   открыть двойным щелчком. Поэтому данные привязаны к устройству и браузеру —
-   перенос между устройствами идёт через «Данные → Выгрузить в файл». */
+/* Хранилище.
+
+   Записи живут на локальном сервере: он кладёт их в файл базы рядом с
+   программой и при каждой правке сохраняет предыдущее состояние в
+   историю. Браузер держит ту же запись в памяти, чтобы экраны считались
+   мгновенно, и отправляет её на сервер после каждого изменения.
+
+   Отправка отложена на долю секунды: при наборе текста в поле правок
+   десятки, а записать достаточно последнюю. */
 'use strict';
 
-const STORE_KEY = 'sales-platform-v1';
-const SCHEMA = 1;
+const SAVE_DELAY = 400;
 
 const CONTRACT_KINDS = {
   main:   { label: 'Основной', tag: 'tag--main',   color: 'var(--c1)' },
@@ -49,55 +53,102 @@ const DOC_STATUSES = {
 /* Состояние подписания вложенного файла. Главное, что нужно видеть по
    скану: он уже подписан обеими сторонами или ещё нет. */
 const SIGN_STATES = {
-  none: { label: 'Не подписан',               short: 'не подписан', tag: 'tag--warn' },
-  one:  { label: 'Подписан одной стороной',   short: 'одна сторона', tag: 'tag--info' },
-  both: { label: 'Подписан с обеих сторон',   short: 'обе стороны',  tag: 'tag--ok' }
+  '':     { label: 'Не отмечено',             short: 'без отметки', tag: '' },
+  none:   { label: 'Не подписан',             short: 'не подписан', tag: 'tag--warn' },
+  one:    { label: 'Подписан одной стороной', short: 'одна сторона', tag: 'tag--info' },
+  both:   { label: 'Подписан с обеих сторон', short: 'обе стороны',  tag: 'tag--ok' }
 };
 
 let state = null;
+let saveTimer = null;
+let pendingEvent = '';
+let lastUpdated = '';
 
 function uid(prefix) {
   return (prefix || 'id') + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
 }
 
 function blankState() {
-  return { schema: SCHEMA, counterparties: [], orders: [], documents: [], payments: [], schedule: [] };
+  return { schema: 1, counterparties: [], orders: [], documents: [], payments: [], schedule: [] };
 }
 
-function load() {
-  let raw = null;
-  try { raw = localStorage.getItem(STORE_KEY); } catch (e) { raw = null; }
-  if (!raw) { state = seedState(); save(); return state; }
-  try {
-    const parsed = JSON.parse(raw);
-    state = Object.assign(blankState(), parsed);
-    ['counterparties', 'orders', 'documents', 'payments', 'schedule'].forEach((k) => {
-      if (!Array.isArray(state[k])) state[k] = [];
+function normalize(doc) {
+  const out = Object.assign(blankState(), doc || {});
+  ['counterparties', 'orders', 'documents', 'payments', 'schedule'].forEach((k) => {
+    if (!Array.isArray(out[k])) out[k] = [];
+  });
+  out.counterparties.forEach((c) => {
+    if (!Array.isArray(c.contracts)) c.contracts = [];
+    if (!Array.isArray(c.priceItems)) c.priceItems = [];
+    delete c.priceFiles;   /* файлы переехали на сервер */
+  });
+  out.orders.forEach((o) => { if (!Array.isArray(o.items)) o.items = []; });
+  out.documents.forEach((d) => { delete d.files; });
+  return out;
+}
+
+function apiFail(res) {
+  return res.json().catch(() => ({})).then((body) => {
+    throw new Error(body.error || ('сервер ответил ' + res.status));
+  });
+}
+
+/* Первая загрузка: записи, вложения и сведения о хранилище одним
+   запросом — чтобы экран не моргал, собираясь по частям. */
+function loadState() {
+  return fetch('/api/state').then((res) => (res.ok ? res.json() : apiFail(res)))
+    .then((body) => {
+      state = normalize(body.doc);
+      setFiles(body.files);
+      lastUpdated = body.updatedAt || '';
+      if (!state.counterparties.length && !state.orders.length) {
+        /* Пустая база — показываем пример, но не сохраняем его сами:
+           он исчезнет, как только появится первая настоящая запись */
+        state = seedState();
+        return pushState('Создан демонстрационный пример').then(() => state);
+      }
+      return state;
     });
-    state.counterparties.forEach((c) => {
-      if (!Array.isArray(c.contracts)) c.contracts = [];
-      if (!Array.isArray(c.priceItems)) c.priceItems = [];
-      if (!Array.isArray(c.priceFiles)) c.priceFiles = [];
+}
+
+/* Отправка на сервер. Событие попадает в историю и объясняет, что
+   именно поменялось. */
+function pushState(event) {
+  return fetch('/api/state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ doc: state, event: event || '' })
+  }).then((res) => (res.ok ? res.json() : apiFail(res)))
+    .then((body) => { lastUpdated = body.updatedAt; return body; });
+}
+
+function db() { return state || blankState(); }
+
+/* save() вызывается из любого места после правки. Отправку откладываем
+   и склеиваем: иначе каждый символ в поле уходил бы отдельным запросом. */
+function save(event) {
+  if (event) pendingEvent = event;
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    const label = pendingEvent;
+    pendingEvent = '';
+    pushState(label).catch((e) => {
+      alert('Не удалось сохранить на сервере: ' + e.message +
+            '\n\nПроверьте, что окно с сервером ещё открыто, и повторите правку.');
     });
-    state.orders.forEach((o) => { if (!Array.isArray(o.items)) o.items = []; });
-    state.documents.forEach((d2) => { if (!Array.isArray(d2.files)) d2.files = []; });
-  } catch (e) {
-    console.error('Не удалось прочитать сохранённые данные, начинаем с примера', e);
-    state = seedState();
-  }
-  return state;
+  }, SAVE_DELAY);
 }
 
-function save() {
-  try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(state));
-  } catch (e) {
-    alert('Не удалось сохранить данные в браузере: ' + e.message +
-          '\n\nВыгрузите данные в файл (вкладка «Данные»), чтобы не потерять их.');
-  }
+/* Немедленная отправка — когда дальше идёт перезагрузка данных */
+function saveNow(event) {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  const label = event || pendingEvent;
+  pendingEvent = '';
+  return pushState(label);
 }
 
-function db() { return state || load(); }
+function storedAt() { return lastUpdated; }
 
 /* ---------------------------------------------------------------- */
 /* Доступ к справочникам                                            */
@@ -144,76 +195,76 @@ function orderTotal(order) {
 /* ---------------------------------------------------------------- */
 /* Запись                                                           */
 /* ---------------------------------------------------------------- */
-function upsert(collection, item, idPrefix) {
+function upsert(collection, item, idPrefix, event) {
   const list = db()[collection];
-  if (!item.id) {
+  const isNew = !item.id;
+  if (isNew) {
     item.id = uid(idPrefix || collection.slice(0, 3));
     list.push(item);
   } else {
     const i = list.findIndex((x) => x.id === item.id);
     if (i >= 0) list[i] = Object.assign(list[i], item); else list.push(item);
   }
-  save();
+  save(event || ((isNew ? 'Добавлено: ' : 'Изменено: ') + collection));
   return item;
 }
 
-function remove(collection, id) {
+function remove(collection, id, event) {
   const list = db()[collection];
   const i = list.findIndex((x) => x.id === id);
-  if (i >= 0) { list.splice(i, 1); save(); }
+  if (i >= 0) { list.splice(i, 1); save(event || ('Удалено: ' + collection)); }
 }
 
 /* Удаление контрагента уносит с собой всё, что на него ссылается:
    иначе в оплатах и документах остались бы строки без владельца. */
 function removeCounterparty(cpId) {
   const d = db();
-  /* Вложения удаляемых документов тоже вычищаем */
-  const ids = [];
-  d.documents.filter((x) => x.cpId === cpId).forEach((x) => docFiles(x).forEach((f) => ids.push(f.id)));
+  /* Сначала собираем всё, что к нему относится: вложения этих записей
+     сервер уберёт отдельно, по владельцу */
+  const owners = [['cp', cpId], ['price', cpId]];
+  d.documents.filter((x) => x.cpId === cpId).forEach((x) => owners.push(['doc', x.id]));
+  d.orders.filter((x) => x.cpId === cpId).forEach((x) => owners.push(['order', x.id]));
+  d.payments.filter((x) => x.cpId === cpId).forEach((x) => owners.push(['pay', x.id]));
   const gone = d.counterparties.find((c) => c.id === cpId);
-  if (gone) priceFiles(gone).forEach((f) => ids.push(f.id));
-  ids.forEach((id) => { try { fileDel(id); } catch (e) { /* хранилище могло не открыться */ } });
+  if (gone) (gone.contracts || []).forEach((k) => owners.push(['contract', k.id]));
+
   d.counterparties = d.counterparties.filter((c) => c.id !== cpId);
   ['orders', 'documents', 'payments', 'schedule'].forEach((k) => {
     d[k] = d[k].filter((x) => x.cpId !== cpId);
   });
-  save();
+  save('Удалён контрагент ' + (gone ? gone.name : ''));
+  return Promise.all(owners.map((o) => dropFilesOf(o[0], o[1])));
 }
 
 function removeContract(cpId, contractId) {
   const c = cpById(cpId);
-  if (!c) return;
-  c.contracts = c.contracts.filter((k) => k.id !== contractId);
+  if (!c) return Promise.resolve();
+  const k = c.contracts.find((x) => x.id === contractId);
+  c.contracts = c.contracts.filter((x) => x.id !== contractId);
   /* Ссылки на договор обнуляем, сами записи оставляем: оплата была,
      даже если договор убрали из справочника. */
-  ['orders', 'documents', 'payments', 'schedule'].forEach((k) => {
-    db()[k].forEach((x) => { if (x.contractId === contractId) x.contractId = ''; });
+  ['orders', 'documents', 'payments', 'schedule'].forEach((key) => {
+    db()[key].forEach((x) => { if (x.contractId === contractId) x.contractId = ''; });
   });
-  save();
+  save('Удалён договор ' + (k ? k.name : ''));
+  return dropFilesOf('contract', contractId);
 }
 
 /* ---------------------------------------------------------------- */
 /* Вложенные файлы                                                  */
 /* ---------------------------------------------------------------- */
-function docFiles(doc) {
-  if (!doc) return [];
-  if (!Array.isArray(doc.files)) doc.files = [];
-  return doc.files;
-}
+/* Сами файлы и их описания живут на сервере, здесь только выборки по
+   владельцу. Владельцы: cp — контрагент целиком, contract — договор,
+   order — заказ, doc — документ, pay — оплата, price — прайс-лист. */
+function docFiles(doc) { return doc ? filesOf('doc', doc.id) : []; }
 
-/* Прайс-лист контрагента: позиции, заведённые руками, и присланные PDF.
-   Лежат у самого контрагента — цены у каждого свои, общего прайса нет. */
 function priceItems(c) {
   if (!c) return [];
   if (!Array.isArray(c.priceItems)) c.priceItems = [];
   return c.priceItems;
 }
 
-function priceFiles(c) {
-  if (!c) return [];
-  if (!Array.isArray(c.priceFiles)) c.priceFiles = [];
-  return c.priceFiles;
-}
+function priceFiles(c) { return c ? filesOf('price', c.id) : []; }
 
 /* Сводка по вложениям документа: сколько файлов и подписан ли он.
    Документ считается подписанным, если хотя бы один скан подписан
@@ -221,90 +272,77 @@ function priceFiles(c) {
 function docSignState(doc) {
   const list = docFiles(doc);
   if (!list.length) return { count: 0, key: 'empty', label: 'нет скана' };
-  if (list.some((f) => f.signed === 'both')) return { count: list.length, key: 'both', label: 'подписан обеими' };
-  if (list.some((f) => f.signed === 'one')) return { count: list.length, key: 'one', label: 'одна сторона' };
+  if (list.some((f) => f.kind === 'both')) return { count: list.length, key: 'both', label: 'подписан обеими' };
+  if (list.some((f) => f.kind === 'one')) return { count: list.length, key: 'one', label: 'одна сторона' };
   return { count: list.length, key: 'none', label: 'без подписей' };
 }
 
-function allFileIds() {
+/* Владельцы, которые ещё существуют. Сервер по этому списку убирает
+   вложения записей, которых больше нет. */
+function liveOwners() {
+  const d = db();
   const out = [];
-  db().documents.forEach((d2) => docFiles(d2).forEach((f) => out.push(f.id)));
-  /* Прайсы тоже лежат в хранилище файлов — без них чистка сочла бы их
-     забытыми и удалила */
-  db().counterparties.forEach((c) => priceFiles(c).forEach((f) => out.push(f.id)));
+  d.counterparties.forEach((c) => {
+    out.push('cp:' + c.id, 'price:' + c.id);
+    (c.contracts || []).forEach((k) => out.push('contract:' + k.id));
+  });
+  d.orders.forEach((o) => out.push('order:' + o.id));
+  d.documents.forEach((x) => out.push('doc:' + x.id));
+  d.payments.forEach((p) => out.push('pay:' + p.id));
   return out;
 }
 
-/* Удаление документа уносит и его вложения: иначе двоичные данные
-   остались бы в хранилище навсегда, без единой ссылки на них. */
+/* Удаление документа уносит и его вложения */
 function removeDocument(docId) {
   const doc = db().documents.find((d2) => d2.id === docId);
-  const ids = doc ? docFiles(doc).map((f) => f.id) : [];
   /* Оплаты остаются: деньги пришли, даже если счёт убрали. Снимаем только
      ссылку, чтобы платёж не указывал в пустоту. */
   db().payments.forEach((p) => { if (p.docId === docId) p.docId = ''; });
-  remove('documents', docId);
-  return Promise.all(ids.map((id) => fileDel(id).catch(() => null)));
+  remove('documents', docId, 'Удалён документ ' + (doc ? (DOC_TYPES[doc.type] || '') + ' №' + (doc.number || '') : ''));
+  return dropFilesOf('doc', docId);
+}
+
+function removeOrder(orderId) {
+  remove('orders', orderId, 'Удалён заказ');
+  return dropFilesOf('order', orderId);
 }
 
 /* ---------------------------------------------------------------- */
 /* Выгрузка и загрузка                                              */
 /* ---------------------------------------------------------------- */
-function exportJSON() { return JSON.stringify(db(), null, 2); }
-
-/* Выгрузка вместе со сканами: файлы переводятся в base64 и кладутся в то
-   же поле, откуда загрузка их и достаёт. Файл получается большим — это
-   полная копия, которой можно поднять работу на другом устройстве. */
-function exportWithFiles() {
-  const snapshot = JSON.parse(JSON.stringify(db()));
-  const metas = [];
-  snapshot.documents.forEach((d2) => (d2.files || []).forEach((f) => metas.push(f)));
-  snapshot.counterparties.forEach((c) => (c.priceFiles || []).forEach((f) => metas.push(f)));
-  return Promise.all(metas.map((f) =>
-    fileGet(f.id).then((blob) => (blob ? blobToBase64(blob).then((b64) => [f.id, { type: f.type, b64: b64 }]) : null))
-      .catch(() => null)
-  )).then((pairs) => {
-    snapshot._files = {};
-    pairs.filter(Boolean).forEach((pair) => { snapshot._files[pair[0]] = pair[1]; });
-    return JSON.stringify(snapshot);
-  });
+/* Выгружаются записи и опись вложений. Сами файлы лежат в папке data
+   рядом с программой — её и копируют целиком, когда нужна полная
+   резервная копия. Класть мегабайты в JSON незачем: папка копируется
+   быстрее и остаётся читаемой. */
+function exportJSON() {
+  return JSON.stringify({ doc: db(), files: allFiles(), exportedAt: new Date().toISOString() }, null, 2);
 }
 
 function importJSON(text, mode) {
   const parsed = JSON.parse(text);
   if (!parsed || typeof parsed !== 'object') throw new Error('Файл не похож на выгрузку платформы');
-  if (!Array.isArray(parsed.counterparties)) throw new Error('В файле нет списка контрагентов');
+  /* Понимаем и новый формат, и выгрузку прежней версии платформы */
+  const doc = parsed.doc && parsed.doc.counterparties ? parsed.doc : parsed;
+  if (!Array.isArray(doc.counterparties)) throw new Error('В файле нет списка контрагентов');
 
-  /* Сканы, если они есть в выгрузке, возвращаются в хранилище файлов.
-     Делается это до правки состояния: если файлы не лягут, ссылки на них
-     не появятся и в данных не останется битых вложений. */
-  const blobs = parsed._files || {};
-  delete parsed._files;
-  const restore = Object.keys(blobs).map((id) =>
-    filePut(id, base64ToBlob(blobs[id].b64, blobs[id].type)).catch(() => null));
   if (mode === 'merge') {
     const d = db();
     const known = new Set(d.counterparties.map((c) => c.id));
-    parsed.counterparties.forEach((c) => { if (!known.has(c.id)) d.counterparties.push(c); });
+    doc.counterparties.forEach((c) => { if (!known.has(c.id)) d.counterparties.push(c); });
     ['orders', 'documents', 'payments', 'schedule'].forEach((k) => {
       const ids = new Set(d[k].map((x) => x.id));
-      (parsed[k] || []).forEach((x) => { if (!ids.has(x.id)) d[k].push(x); });
+      (doc[k] || []).forEach((x) => { if (!ids.has(x.id)) d[k].push(x); });
     });
+    state = normalize(d);
   } else {
-    state = Object.assign(blankState(), parsed);
+    state = normalize(doc);
   }
-  state.documents.forEach((d2) => { if (!Array.isArray(d2.files)) d2.files = []; });
-  state.counterparties.forEach((c) => {
-    if (!Array.isArray(c.priceItems)) c.priceItems = [];
-    if (!Array.isArray(c.priceFiles)) c.priceFiles = [];
-  });
-  save();
-  return Promise.all(restore).then(() => Object.keys(blobs).length);
+  return saveNow(mode === 'merge' ? 'Загружены данные из файла (добавление)' : 'Загружены данные из файла');
 }
 
 function resetAll(withSample) {
   state = withSample ? seedState() : blankState();
-  save();
+  return saveNow(withSample ? 'Возвращён демонстрационный пример' : 'Данные очищены');
 }
 
 /* ---------------------------------------------------------------- */
@@ -325,7 +363,6 @@ function seedState() {
     city: 'Хабаровск', address: 'г. Хабаровск, ул. Ленина, 18, оф. 404',
     contactPerson: 'Игнатьев Сергей', phone: '+7 (914) 200-10-10', email: 'sales@amur.example',
     manager: 'Лиза', note: 'Работаем по двум договорам: основной денежный и бартерный.',
-    priceFiles: [],
     priceItems: [
       { id: 'pi-a1', article: 'МР-25', name: 'Мука рыбная, мешок 25 кг', unit: 'т', price: 71000, note: 'Цена действует с начала квартала.' },
       { id: 'pi-a2', article: 'СЛ-2', name: 'Соль пищевая помол №2', unit: 'т', price: 9800, note: '' },
@@ -345,7 +382,6 @@ function seedState() {
     city: 'Южно-Сахалинск', address: 'г. Южно-Сахалинск, пр. Мира, 112',
     contactPerson: 'Ким Ольга', phone: '+7 (962) 300-44-55', email: 'zakaz@sakh-sharks.example',
     manager: 'Лиза', note: 'Один договор, оплата преимущественно безналом.',
-    priceFiles: [],
     priceItems: [
       { id: 'pi-s1', article: 'ЯЩ-20', name: 'Ящик рыбный 20 кг', unit: 'шт', price: 165, note: '' },
       { id: 'pi-s2', article: 'ЛД-Т', name: 'Лёд технический', unit: 'т', price: 4200, note: 'Доставка по городу включена.' }
@@ -385,25 +421,25 @@ function seedState() {
 
   s.documents = [
     { id: 'doc-1', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: '', type: 'contract',
-      number: 'А-' + y + '/14', date: y + '-01-15', amount: 0, status: 'signed', files: [], note: 'Рамочный договор поставки.' },
+      number: 'А-' + y + '/14', date: y + '-01-15', amount: 0, status: 'signed', note: 'Рамочный договор поставки.' },
     { id: 'doc-2', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: 'ord-1', type: 'spec',
-      number: 'С-114', date: day(-3, 5), amount: 892000, status: 'signed', files: [], note: '' },
+      number: 'С-114', date: day(-3, 5), amount: 892000, status: 'signed', note: '' },
     { id: 'doc-3', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: 'ord-1', type: 'invoice',
-      number: '114', date: day(-3, 6), amount: 892000, status: 'paid', files: [], note: 'Оплачен двумя частями.' },
+      number: '114', date: day(-3, 6), amount: 892000, status: 'paid', note: 'Оплачен двумя частями.' },
     { id: 'doc-4', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: 'ord-1', type: 'upd',
-      number: 'УПД-114', date: day(-3, 18), amount: 892000, status: 'signed', files: [], note: '' },
+      number: 'УПД-114', date: day(-3, 18), amount: 892000, status: 'signed', note: '' },
     { id: 'doc-5', cpId: 'cp-amur', contractId: 'k-amur-barter', orderId: 'ord-2', type: 'contract',
-      number: 'А-' + y + '/14-Б', date: y + '-02-03', amount: 0, status: 'signed', files: [], note: 'Бартерный договор.' },
+      number: 'А-' + y + '/14-Б', date: y + '-02-03', amount: 0, status: 'signed', note: 'Бартерный договор.' },
     { id: 'doc-6', cpId: 'cp-amur', contractId: 'k-amur-barter', orderId: 'ord-2', type: 'spec',
-      number: 'С-118Б', date: day(-2, 9), amount: 465000, status: 'signed', files: [], note: 'Перечень встречной поставки.' },
+      number: 'С-118Б', date: day(-2, 9), amount: 465000, status: 'signed', note: 'Перечень встречной поставки.' },
     { id: 'doc-7', cpId: 'cp-amur', contractId: 'k-amur-barter', orderId: 'ord-2', type: 'invoice',
-      number: '118Б', date: day(-2, 10), amount: 465000, status: 'sent', files: [], note: 'Частично закрыт взаимозачётом.' },
+      number: '118Б', date: day(-2, 10), amount: 465000, status: 'sent', note: 'Частично закрыт взаимозачётом.' },
     { id: 'doc-8', cpId: 'cp-sharks', contractId: 'k-sharks-main', orderId: '', type: 'contract',
-      number: 'СА-' + y + '/07', date: y + '-03-11', amount: 0, status: 'signed', files: [], note: '' },
+      number: 'СА-' + y + '/07', date: y + '-03-11', amount: 0, status: 'signed', note: '' },
     { id: 'doc-9', cpId: 'cp-sharks', contractId: 'k-sharks-main', orderId: 'ord-3', type: 'spec',
-      number: 'С-121', date: day(-1, 12), amount: 522000, status: 'sent', files: [], note: 'Ждём подпись.' },
+      number: 'С-121', date: day(-1, 12), amount: 522000, status: 'sent', note: 'Ждём подпись.' },
     { id: 'doc-10', cpId: 'cp-sharks', contractId: 'k-sharks-main', orderId: 'ord-3', type: 'invoice',
-      number: '121', date: day(-1, 13), amount: 522000, status: 'sent', files: [], note: 'Предоплата 50%.' }
+      number: '121', date: day(-1, 13), amount: 522000, status: 'sent', note: 'Предоплата 50%.' }
   ];
 
   s.payments = [
@@ -427,7 +463,7 @@ function seedState() {
 
   s.schedule = [
     { id: 'sch-0', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: 'ord-1', dueDate: day(-2, 10),
-      amount: 392000, method: 'bank', status: 'paid', files: [], note: 'Остаток по счёту 114 — закрыт.' },
+      amount: 392000, method: 'bank', status: 'paid', note: 'Остаток по счёту 114 — закрыт.' },
     { id: 'sch-1', cpId: 'cp-amur', contractId: 'k-amur-barter', orderId: 'ord-2', dueDate: day(-1, 25),
       amount: 195000, method: 'cash', status: 'plan', note: 'Остаток по бартеру — просрочен.' },
     { id: 'sch-2', cpId: 'cp-sharks', contractId: 'k-sharks-main', orderId: 'ord-3', dueDate: day(0, 20),

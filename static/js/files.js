@@ -1,106 +1,136 @@
-/* Хранилище вложенных файлов.
+/* Вложенные файлы.
 
-   Сканы договоров и счетов — это мегабайты, а localStorage рассчитан на
-   килобайты и хранит только строки: PDF пришлось бы переводить в base64,
-   раздувая его на треть, и первый же десяток документов переполнил бы
-   хранилище. Поэтому сами файлы лежат в IndexedDB как двоичные объекты, а
-   в общем JSON остаётся только описание: имя, размер, дата, подписан или
-   нет. IndexedDB работает и когда страницу открыли прямо из файла. */
+   Файлы лежат на диске рядом с программой, а их описание — в базе рядом
+   с ними. Браузер только отправляет и получает их по адресу /api/files,
+   поэтому размер ограничен лишь диском, а не правилами хранилища
+   браузера, и файлы переживают чистку истории браузера.
+
+   Описание всех вложений загружается один раз вместе с данными и лежит в
+   памяти: по нему рисуются списки и скрепки, не дёргая сервер на каждую
+   строку таблицы. */
 'use strict';
 
-const FILES_DB = 'sales-platform-files';
-const FILES_STORE = 'files';
+/* 200 МБ — предел, который принимает сервер */
+const MAX_FILE_MB = 200;
 
-let dbPromise = null;
+/* Что можно приложить. Список совпадает с серверным: если добавлять сюда
+   новое, добавить и там, иначе загрузка вернёт отказ. */
+const ACCEPT_FILES =
+  '.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.odt,.ods,' +
+  '.png,.jpg,.jpeg,.gif,.webp,.heic,.bmp,.tif,.tiff,' +
+  '.zip,.rar,.7z,.eml,.msg,.json';
 
-function filesDB() {
-  if (dbPromise) return dbPromise;
-  dbPromise = new Promise((resolve, reject) => {
-    let req;
-    try { req = indexedDB.open(FILES_DB, 1); }
-    catch (e) { reject(e); return; }
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(FILES_STORE)) db.createObjectStore(FILES_STORE, { keyPath: 'id' });
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error || new Error('Не удалось открыть хранилище файлов'));
-    req.onblocked = () => reject(new Error('Хранилище файлов занято другой вкладкой'));
-  });
-  return dbPromise;
+let fileIndex = [];
+
+function setFiles(list) { fileIndex = Array.isArray(list) ? list : []; }
+function allFiles() { return fileIndex; }
+
+/* Вложения одного владельца: документа, заказа, договора, оплаты,
+   прайса или самого контрагента */
+function filesOf(ownerKind, ownerId) {
+  if (!ownerId) return [];
+  return fileIndex.filter((f) => f.ownerKind === ownerKind && f.ownerId === ownerId);
 }
 
-function filesTx(mode, run) {
-  return filesDB().then((db) => new Promise((resolve, reject) => {
-    const tx = db.transaction(FILES_STORE, mode);
-    const store = tx.objectStore(FILES_STORE);
-    let result;
-    try { result = run(store); } catch (e) { reject(e); return; }
-    tx.oncomplete = () => resolve(result && result.__req ? result.__req.result : result);
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error || new Error('Запись прервана'));
-  }));
+/* Все файлы контрагента — из них собирается его база документации */
+function filesOfCp(cpId) {
+  if (!cpId) return [];
+  return fileIndex.filter((f) => f.cpId === cpId);
 }
 
-function filePut(id, blob) {
-  return filesTx('readwrite', (store) => { store.put({ id: id, blob: blob }); });
+function fileById(id) { return fileIndex.find((f) => f.id === id) || null; }
+
+/* Адрес файла. Открывается и скачивается прямо по ссылке: сервер отдаёт
+   его с правильным типом и исходным именем, в том числе кириллическим. */
+function fileUrl(id, download) {
+  return '/api/files/' + encodeURIComponent(id) + (download ? '?download=1' : '');
 }
 
-function fileGet(id) {
-  return filesTx('readonly', (store) => ({ __req: store.get(id) }))
-    .then((row) => (row && row.blob) ? row.blob : null);
-}
-
-function fileDel(id) {
-  return filesTx('readwrite', (store) => { store.delete(id); });
-}
-
-function fileKeys() {
-  return filesTx('readonly', (store) => ({ __req: store.getAllKeys() }));
-}
-
-/* Вложения, на которые больше никто не ссылается, занимают место зря:
-   это остатки от удалённых документов и контрагентов. */
-function filesCleanup(usedIds) {
-  const used = {};
-  usedIds.forEach((id) => { used[id] = true; });
-  return fileKeys().then((keys) => {
-    const orphans = (keys || []).filter((k) => !used[k]);
-    return Promise.all(orphans.map(fileDel)).then(() => orphans.length);
+function apiError(res) {
+  return res.json().catch(() => ({})).then((body) => {
+    throw new Error(body.error || ('сервер ответил ' + res.status));
   });
 }
 
-/* Суммарный вес хранилища — показываем во вкладке «Данные» */
-function filesTotalSize() {
-  return filesTx('readonly', (store) => ({ __req: store.getAll() }))
-    .then((rows) => (rows || []).reduce((s, r) => s + ((r.blob && r.blob.size) || 0), 0));
+function refreshFiles() {
+  return fetch('/api/files').then((res) => (res.ok ? res.json() : apiError(res)))
+    .then((body) => { setFiles(body.files); return fileIndex; });
+}
+
+/* Загрузка идёт телом запроса, без формы: имя и владелец передаются в
+   адресе. Так не нужен разбор multipart ни здесь, ни на сервере, и
+   большой файл не копируется лишний раз в память браузера. */
+function uploadFile(ownerKind, ownerId, cpId, file, kind, label) {
+  const params = new URLSearchParams({
+    ownerKind: ownerKind, ownerId: ownerId, cpId: cpId || '',
+    name: file.name, kind: kind || '', label: label || ''
+  });
+  return fetch('/api/files?' + params.toString(), {
+    method: 'POST',
+    headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    body: file
+  }).then((res) => (res.ok ? res.json() : apiError(res)))
+    .then((body) => { fileIndex.unshift(body.file); return body.file; });
+}
+
+function updateFileMeta(id, fields) {
+  return fetch('/api/files/' + encodeURIComponent(id), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields)
+  }).then((res) => (res.ok ? res.json() : apiError(res)))
+    .then((body) => {
+      const i = fileIndex.findIndex((f) => f.id === id);
+      if (i >= 0) fileIndex[i] = body.file;
+      return body.file;
+    });
+}
+
+function deleteFileApi(id) {
+  return fetch('/api/files/' + encodeURIComponent(id), { method: 'DELETE' })
+    .then((res) => (res.ok ? res.json() : apiError(res)))
+    .then(() => { fileIndex = fileIndex.filter((f) => f.id !== id); });
+}
+
+/* Владельца удалили — его вложения тоже не нужны */
+function dropFilesOf(ownerKind, ownerId) {
+  return fetch('/api/owner-removed', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ownerKind: ownerKind, ownerId: ownerId })
+  }).then(() => { fileIndex = fileIndex.filter((f) => !(f.ownerKind === ownerKind && f.ownerId === ownerId)); })
+    .catch(() => null);
+}
+
+function storageInfo() {
+  return fetch('/api/storage').then((res) => (res.ok ? res.json() : apiError(res)));
+}
+
+function cleanupFiles(owners) {
+  return fetch('/api/cleanup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ owners: owners })
+  }).then((res) => (res.ok ? res.json() : apiError(res)))
+    .then((body) => refreshFiles().then(() => body.removed));
 }
 
 function fmtSize(bytes) {
   const n = Number(bytes) || 0;
+  if (n >= 1073741824) return (n / 1073741824).toLocaleString('ru-RU', { maximumFractionDigits: 2 }) + ' ГБ';
   if (n >= 1048576) return (n / 1048576).toLocaleString('ru-RU', { maximumFractionDigits: 1 }) + ' МБ';
   if (n >= 1024) return Math.round(n / 1024).toLocaleString('ru-RU') + ' КБ';
   return n + ' Б';
 }
 
-/* Blob в строку base64 и обратно — только для выгрузки и загрузки вместе
-   с файлами. В обычной работе файл никогда не становится строкой. */
-function blobToBase64(blob) {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => {
-      const s = String(r.result);
-      const comma = s.indexOf(',');
-      resolve(comma >= 0 ? s.slice(comma + 1) : s);
-    };
-    r.onerror = () => reject(r.error);
-    r.readAsDataURL(blob);
-  });
-}
-
-function base64ToBlob(b64, type) {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Blob([bytes], { type: type || 'application/pdf' });
+/* Короткая метка типа для значка файла */
+function fileBadge(meta) {
+  const ext = String(meta.name || '').split('.').pop().toLowerCase();
+  if (['doc', 'docx', 'odt', 'rtf'].indexOf(ext) >= 0) return { label: 'DOC', cls: 'file__icon--doc' };
+  if (['xls', 'xlsx', 'csv', 'ods'].indexOf(ext) >= 0) return { label: 'XLS', cls: 'file__icon--xls' };
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic', 'bmp', 'tif', 'tiff'].indexOf(ext) >= 0)
+    return { label: 'IMG', cls: 'file__icon--img' };
+  if (['zip', 'rar', '7z'].indexOf(ext) >= 0) return { label: 'ZIP', cls: 'file__icon--zip' };
+  if (ext === 'pdf') return { label: 'PDF', cls: 'file__icon--pdf' };
+  return { label: (ext || 'файл').slice(0, 4).toUpperCase(), cls: '' };
 }

@@ -131,3 +131,29 @@ function asciiFileName(name, fallback) {
     .replace(/^-|-$/g, '');
   return ascii || (fallback || 'file');
 }
+
+/* Дата и время — для истории правок и отметок о загрузке. На вход идёт
+   метка времени от сервера (ISO с часовым поясом). */
+function fmtDateTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const p = (n) => String(n).padStart(2, '0');
+  return p(d.getDate()) + '.' + p(d.getMonth() + 1) + '.' + d.getFullYear() +
+    ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+/* «2 минуты назад» — в истории так понятнее, чем точная метка */
+function fmtAgo(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const sec = Math.round((Date.now() - d.getTime()) / 1000);
+  if (sec < 60) return 'только что';
+  const min = Math.round(sec / 60);
+  if (min < 60) return min + ' ' + plural(min, 'минуту', 'минуты', 'минут') + ' назад';
+  const hours = Math.round(min / 60);
+  if (hours < 24) return hours + ' ' + plural(hours, 'час', 'часа', 'часов') + ' назад';
+  const days = Math.round(hours / 24);
+  if (days < 30) return days + ' ' + plural(days, 'день', 'дня', 'дней') + ' назад';
+  return fmtDate(iso.slice(0, 10));
+}

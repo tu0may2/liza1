@@ -10,7 +10,7 @@
 'use strict';
 
 let route = { view: 'dash', cpId: '', sub: 'summary', orderId: '' };
-let filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '', scan: '' };
+let filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '', scan: '', search: '' };
 
 /* Подглядывающий котик — общий для пустых мест платформы. Контур один,
    цвет берётся от текста, поэтому он живёт на любой подложке и в обеих
@@ -373,9 +373,25 @@ function openForm(cfg) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Вложенные файлы документа                                          */
+/* Вложения                                                           */
 /* ------------------------------------------------------------------ */
-const MAX_FILE_MB = 25;
+/* Один и тот же блок для всего: к контрагенту, договору, заказу,
+   документу, оплате и прайсу прикладываются файлы одинаково. Владелец
+   задаётся парой «вид:идентификатор», и серверу этого достаточно. */
+
+const OWNER_TITLES = {
+  cp: 'Контрагент', contract: 'Договор', order: 'Заказ',
+  doc: 'Документ', pay: 'Оплата', price: 'Прайс-лист'
+};
+
+/* Отметка подписания нужна там, где есть две стороны: договор и
+   документы. Для скрина переписки или прайса она бессмысленна. */
+function ownerWantsSigning(kind) { return kind === 'doc' || kind === 'contract'; }
+
+function signTag(kind) {
+  const st = SIGN_STATES[kind || ''] || SIGN_STATES[''];
+  return st.tag ? tag(st.label, st.tag) : '<span class="hint">' + esc(st.label) + '</span>';
+}
 
 /* Скрепка в таблице: сразу видно, есть ли скан и подписан ли он. */
 function clipHTML(doc) {
@@ -386,48 +402,91 @@ function clipHTML(doc) {
     ' · ' + esc(st.label) + '</span>';
 }
 
-function signTag(signed) {
-  const st = SIGN_STATES[signed] || SIGN_STATES.none;
-  return tag(st.label, st.tag);
+/* Короткая скрепка для любой записи — без разбора подписей */
+function clipFor(ownerKind, ownerId) {
+  const n = filesOf(ownerKind, ownerId).length;
+  return n ? '<span class="paperclip" title="вложений: ' + n + '">📎 ' + n + '</span>'
+           : '<span class="hint">—</span>';
 }
 
-/* Открыть файл в новой вкладке. Страница может быть открыта из файла, и
-   тогда у blob-ссылки нет происхождения — переход делаем настоящей
-   ссылкой по клику пользователя, так надёжнее, чем window.open. */
-function openBlob(blob, name, download) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  if (download) a.download = asciiFileName(name, 'document.pdf');
-  else { a.target = '_blank'; a.rel = 'noopener'; }
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 30000);
+/* Строка файла. Открывается и скачивается обычной ссылкой: файл лежит на
+   сервере, и браузер сам покажет PDF или картинку во вкладке. */
+function fileRowHTML(meta, opts) {
+  const o = opts || {};
+  const badge = fileBadge(meta);
+  return '<div class="file">' +
+      '<a class="file__icon ' + badge.cls + '" href="' + fileUrl(meta.id) + '" target="_blank" rel="noopener" ' +
+        'title="Открыть">' + esc(badge.label) + '</a>' +
+      '<span class="file__body">' +
+        '<a class="file__name" href="' + fileUrl(meta.id) + '" target="_blank" rel="noopener" title="' +
+          esc(meta.name) + '">' + esc(meta.name) + '</a>' +
+        '<span class="file__meta">' + fmtSize(meta.size) + ' · ' + fmtDateTime(meta.uploadedAt) +
+          (o.showOwner ? ' · ' + esc(ownerLabel(meta)) : '') + '</span>' +
+      '</span>' +
+      (o.signing
+        ? '<label class="field" style="min-width:210px"><span>Подписание</span>' +
+            '<select data-file-kind="' + esc(meta.id) + '">' +
+              selectOptions(Object.keys(SIGN_STATES).map((k) => [k, SIGN_STATES[k].label]), meta.kind || '') +
+            '</select></label>'
+        : '') +
+      '<span class="file__actions">' +
+        '<a class="btn btn--sm" href="' + fileUrl(meta.id, true) + '">Скачать</a>' +
+        '<button class="btn btn--sm btn--danger" data-act="file-del" data-id="' + esc(meta.id) +
+          '" type="button">Удалить</button>' +
+      '</span>' +
+    '</div>';
 }
 
-function openFilesModal(docId) {
-  const doc = db().documents.find((x) => x.id === docId);
-  if (!doc) return;
+function ownerLabel(meta) {
+  if (meta.ownerKind === 'doc') {
+    const d = db().documents.find((x) => x.id === meta.ownerId);
+    return d ? (DOC_TYPES[d.type] || 'Документ') + ' №' + (d.number || '—') : 'документ удалён';
+  }
+  if (meta.ownerKind === 'order') {
+    const o = orderById(meta.ownerId);
+    return o ? 'Заказ ' + (o.number || '') : 'заказ удалён';
+  }
+  if (meta.ownerKind === 'contract') {
+    const c = cpById(meta.cpId);
+    const k = c && (c.contracts || []).find((x) => x.id === meta.ownerId);
+    return k ? 'Договор ' + k.name : 'договор удалён';
+  }
+  if (meta.ownerKind === 'pay') {
+    const p = db().payments.find((x) => x.id === meta.ownerId);
+    return p ? 'Оплата от ' + fmtDate(p.date) : 'оплата удалена';
+  }
+  return OWNER_TITLES[meta.ownerKind] || 'Прочее';
+}
 
+/* Блок «перетащите файлы» плюс список вложений. Вставляется в любую
+   карточку; обработчики навешиваются после отрисовки, разом на все. */
+function attachBlock(ownerKind, ownerId, cpId, opts) {
+  const o = opts || {};
+  const list = filesOf(ownerKind, ownerId);
+  return '<div class="drop" data-drop data-owner-kind="' + esc(ownerKind) + '" data-owner-id="' + esc(ownerId) +
+      '" data-cp="' + esc(cpId || '') + '" tabindex="0" role="button">' +
+      '<span class="drop__cat">' + catSVG() + '</span>' +
+      '<b>' + esc(o.title || 'Перетащите файлы или нажмите, чтобы выбрать') + '</b>' +
+      esc(o.hint || 'PDF, Word, Excel, сканы и скриншоты — до ' + MAX_FILE_MB + ' МБ каждый.') +
+    '</div>' +
+    '<input type="file" data-drop-input accept="' + ACCEPT_FILES + '" multiple hidden>' +
+    (list.length
+      ? '<div class="files" style="margin-top:14px">' +
+        list.map((f) => fileRowHTML(f, { signing: ownerWantsSigning(ownerKind) })).join('') + '</div>'
+      : '');
+}
+
+/* Окно вложений — для строк таблиц, где места под блок нет */
+function openAttachModal(ownerKind, ownerId, cpId, title, subtitle) {
   const back = document.createElement('div');
   back.className = 'modal-back';
   back.innerHTML =
-    '<div class="modal" role="dialog" aria-modal="true" aria-label="Файлы документа">' +
-      '<header class="modal__head"><h2>Файлы: ' +
-        esc(DOC_TYPES[doc.type] || doc.type) + ' №' + esc(doc.number || '—') + '</h2>' +
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="Вложения">' +
+      '<header class="modal__head"><h2>' + esc(title) + '</h2>' +
         '<button class="btn btn--sm" data-close type="button">Закрыть</button></header>' +
-      '<div class="modal__body">' +
-        '<p class="hint" style="margin-top:0">' + esc(cpName(doc.cpId)) + ' · ' + fmtDate(doc.date) +
-          (Number(doc.amount) ? ' · ' + fmtMoney(doc.amount) : '') + '</p>' +
-        '<div class="drop" id="drop" tabindex="0" role="button">' +
-          '<span class="drop__cat">' + catSVG() + '</span>' +
-          '<b>Перетащите сюда PDF или нажмите, чтобы выбрать</b>' +
-          'Можно сразу несколько файлов: неподписанный и подписанный экземпляры. ' +
-          'Принимаются PDF и фотографии скана, до ' + MAX_FILE_MB + '\u00a0МБ каждый.' +
-        '</div>' +
-        '<input type="file" id="file-input" accept="application/pdf,image/*" multiple hidden>' +
-        '<div id="file-list" style="margin-top:16px"></div>' +
+      '<div class="modal__body" id="attach-body">' +
+        (subtitle ? '<p class="hint" style="margin-top:0">' + esc(subtitle) + '</p>' : '') +
+        attachBlock(ownerKind, ownerId, cpId) +
       '</div>' +
       '<footer class="modal__foot">' +
         '<button class="btn btn--primary" data-close type="button">Готово</button>' +
@@ -438,110 +497,94 @@ function openFilesModal(docId) {
   const onKey = (e) => { if (e.key === 'Escape') close(); };
   document.addEventListener('keydown', onKey);
 
-  const listBox = () => back.querySelector('#file-list');
-
-  function paint() {
-    const list = docFiles(doc);
-    if (!list.length) {
-      /* Котик уже сидит в зоне загрузки прямо над этим местом — второй
-         подряд был бы перебором */
-      listBox().innerHTML = '<p class="hint" style="text-align:center;margin:0">Файлов пока нет</p>';
-      return;
-    }
-    listBox().innerHTML = '<div class="files">' + list.map((f) =>
-      '<div class="file">' +
-        '<span class="file__icon">' + (/(^image\/)/.test(f.type || '') ? 'IMG' : 'PDF') + '</span>' +
-        '<span class="file__body">' +
-          '<span class="file__name" title="' + esc(f.name) + '">' + esc(f.name) + '</span>' +
-          '<span class="file__meta">' + fmtSize(f.size) + ' · загружен ' + fmtDate(f.addedAt) + '</span>' +
-        '</span>' +
-        '<label class="field" style="min-width:210px">' +
-          '<span>Подписание</span>' +
-          '<select data-sign="' + esc(f.id) + '">' +
-            selectOptions(Object.keys(SIGN_STATES).map((k) => [k, SIGN_STATES[k].label]), f.signed) +
-          '</select>' +
-        '</label>' +
-        '<span class="file__actions">' +
-          '<button class="btn btn--sm" data-file-open="' + esc(f.id) + '" type="button">Открыть</button>' +
-          '<button class="btn btn--sm" data-file-save="' + esc(f.id) + '" type="button">Скачать</button>' +
-          '<button class="btn btn--sm btn--danger" data-file-del="' + esc(f.id) + '" type="button">Удалить</button>' +
-        '</span>' +
-      '</div>').join('') + '</div>';
-  }
-
-  function addFiles(fileList) {
-    const files = Array.prototype.slice.call(fileList || []);
-    if (!files.length) return;
-    const tooBig = files.filter((f) => f.size > MAX_FILE_MB * 1048576);
-    if (tooBig.length) {
-      alert('Слишком большие файлы (больше ' + MAX_FILE_MB + ' МБ):\n' +
-            tooBig.map((f) => f.name).join('\n') + '\n\nСожмите скан и попробуйте снова.');
-    }
-    const ok = files.filter((f) => f.size <= MAX_FILE_MB * 1048576);
-    Promise.all(ok.map((f) => {
-      const id = uid('file');
-      return filePut(id, f).then(() => {
-        docFiles(doc).push({
-          id: id, name: f.name, size: f.size, type: f.type || 'application/pdf',
-          signed: 'none', addedAt: today()
-        });
-      });
-    })).then(() => { save(); paint(); })
-      .catch((e) => alert('Не удалось сохранить файл: ' + e.message));
-  }
+  const repaint = () => {
+    const body = back.querySelector('#attach-body');
+    body.innerHTML = (subtitle ? '<p class="hint" style="margin-top:0">' + esc(subtitle) + '</p>' : '') +
+      attachBlock(ownerKind, ownerId, cpId);
+    bindDrops(back);
+  };
+  back.repaint = repaint;
 
   back.addEventListener('click', (e) => {
     if (e.target === back || e.target.closest('[data-close]')) { close(); return; }
-    if (e.target.closest('#drop')) { back.querySelector('#file-input').click(); return; }
-
-    const open = e.target.closest('[data-file-open]');
-    const dl = e.target.closest('[data-file-save]');
-    const del = e.target.closest('[data-file-del]');
-    const id = (open || dl || del) && (open || dl || del).getAttribute(
-      open ? 'data-file-open' : dl ? 'data-file-save' : 'data-file-del');
-    if (!id) return;
-
+    const del = e.target.closest('[data-act="file-del"]');
     if (del) {
-      const f = docFiles(doc).find((x) => x.id === id);
-      if (!confirm('Удалить файл «' + (f ? f.name : '') + '»?')) return;
-      fileDel(id).catch(() => null).then(() => {
-        doc.files = docFiles(doc).filter((x) => x.id !== id);
-        save(); paint();
-      });
-      return;
+      const meta = fileById(del.getAttribute('data-id'));
+      if (!meta || !confirm('Удалить файл «' + meta.name + '»?')) return;
+      deleteFileApi(meta.id).then(repaint).catch((err) => alert('Не удалось удалить: ' + err.message));
     }
-    const meta = docFiles(doc).find((x) => x.id === id);
-    fileGet(id).then((blob) => {
-      if (!blob) { alert('Файл не найден в хранилище — возможно, он был удалён.'); return; }
-      openBlob(blob, meta && meta.name, !!dl);
-    }).catch((e) => alert('Не удалось прочитать файл: ' + e.message));
   });
 
   back.addEventListener('change', (e) => {
-    if (e.target.id === 'file-input') { addFiles(e.target.files); e.target.value = ''; return; }
-    const sign = e.target.closest('[data-sign]');
-    if (sign) {
-      const f = docFiles(doc).find((x) => x.id === sign.getAttribute('data-sign'));
-      if (f) { f.signed = sign.value; save(); }
-    }
-  });
-
-  /* Перетаскивание: гасим поведение браузера, иначе он просто откроет
-     файл поверх страницы и работа потеряется */
-  const drop = back.querySelector('#drop');
-  ['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => {
-    e.preventDefault(); drop.classList.add('drop--over');
-  }));
-  ['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => {
-    e.preventDefault(); drop.classList.remove('drop--over');
-  }));
-  drop.addEventListener('drop', (e) => addFiles(e.dataTransfer && e.dataTransfer.files));
-  drop.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); back.querySelector('#file-input').click(); }
+    const sel = e.target.closest('[data-file-kind]');
+    if (sel) updateFileMeta(sel.getAttribute('data-file-kind'), { kind: sel.value }).catch(() => null);
   });
 
   document.body.appendChild(back);
-  paint();
+  bindDrops(back);
+}
+
+/* Загрузка: общая для всех зон. Файлы уходят по одному, чтобы крупный
+   не задерживал остальные и чтобы отказ по одному не терял другие. */
+function uploadInto(ownerKind, ownerId, cpId, fileList, after) {
+  const files = Array.prototype.slice.call(fileList || []);
+  if (!files.length) return;
+  const tooBig = files.filter((f) => f.size > MAX_FILE_MB * 1048576);
+  if (tooBig.length) {
+    alert('Слишком большие файлы (больше ' + MAX_FILE_MB + ' МБ):\n' + tooBig.map((f) => f.name).join('\n'));
+  }
+  const ok = files.filter((f) => f.size <= MAX_FILE_MB * 1048576);
+  if (!ok.length) return;
+
+  /* Подпись для истории: по ней потом видно, куда именно лёг файл */
+  const label = (cpId ? cpName(cpId) + ' · ' : '') +
+    ownerLabel({ ownerKind: ownerKind, ownerId: ownerId, cpId: cpId });
+
+  let chain = Promise.resolve();
+  const failed = [];
+  ok.forEach((f) => {
+    chain = chain.then(() => uploadFile(ownerKind, ownerId, cpId, f, '', label).catch((e) => {
+      failed.push(f.name + ' — ' + e.message);
+    }));
+  });
+  chain.then(() => {
+    if (failed.length) alert('Не удалось загрузить:\n' + failed.join('\n'));
+    if (after) after(); else render();
+  });
+}
+
+/* Все зоны перетаскивания на экране. Вызывается после каждой отрисовки:
+   разметка пересобирается целиком, и слушатели вместе с ней. */
+function bindDrops(scope) {
+  const root = scope || document;
+  root.querySelectorAll('[data-drop]').forEach((drop) => {
+    const input = drop.parentNode.querySelector('[data-drop-input]');
+    if (!input || drop.dataset.bound === '1') return;
+    drop.dataset.bound = '1';
+    const ownerKind = drop.getAttribute('data-owner-kind');
+    const ownerId = drop.getAttribute('data-owner-id');
+    const cpId = drop.getAttribute('data-cp');
+    const after = scope && scope.repaint ? scope.repaint : null;
+
+    drop.addEventListener('click', () => input.click());
+    drop.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
+    });
+    input.addEventListener('change', () => {
+      uploadInto(ownerKind, ownerId, cpId, input.files, after);
+      input.value = '';
+    });
+    /* Гасим поведение браузера: иначе он откроет файл поверх страницы */
+    ['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => {
+      e.preventDefault(); drop.classList.add('drop--over');
+    }));
+    ['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => {
+      e.preventDefault(); drop.classList.remove('drop--over');
+    }));
+    drop.addEventListener('drop', (e) => {
+      uploadInto(ownerKind, ownerId, cpId, e.dataTransfer && e.dataTransfer.files, after);
+    });
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -565,7 +608,8 @@ function navHTML() {
   }).join('');
 
   const rest = [['orders', 'Заказы'], ['payments', 'Оплаты'], ['docs', 'Документы'],
-                ['analytics', 'Аналитика'], ['cps', 'Контрагенты'], ['data', 'Данные']];
+                ['analytics', 'Аналитика'], ['cps', 'Контрагенты'],
+                ['history', 'История'], ['data', 'Данные']];
   const restTabs = rest.map((it) =>
     '<button class="tab' + (route.view === it[0] ? ' tab--active' : '') + '" data-nav="' + it[0] + '" type="button">' +
     esc(it[1]) + '</button>').join('');
@@ -574,6 +618,9 @@ function navHTML() {
 }
 
 function go(view, extra) {
+  /* История живёт на сервере и меняется от каждой правки — при входе в
+     раздел её всегда перечитываем, иначе показали бы вчерашний список */
+  if (view === 'history') historyRows = null;
   route = Object.assign({ view: view, cpId: '', sub: 'summary', orderId: '' }, extra || {});
   if (view === 'cp' && !route.sub) route.sub = 'summary';
   window.scrollTo({ top: 0 });
@@ -763,7 +810,7 @@ function payTable(rows, opts) {
   if (!rows.length) return emptyBox('Оплат по этому фильтру нет');
   return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
     '<th>Дата</th>' + (o.hideCp ? '' : '<th>Контрагент</th>') + '<th>Договор</th><th>Заказ</th><th>Счёт</th>' +
-    '<th>Способ</th><th class="num">Сумма</th><th>Комментарий</th><th></th>' +
+    '<th>Способ</th><th class="num">Сумма</th><th>Файлы</th><th>Комментарий</th><th></th>' +
     '</tr></thead><tbody>' +
     rows.map((p) => '<tr>' +
       '<td class="nowrap">' + fmtDate(p.date) + '</td>' +
@@ -773,12 +820,16 @@ function payTable(rows, opts) {
       '<td class="nowrap">' + docLabel(p.docId) + '</td>' +
       '<td>' + methodTag(p.method) + '</td>' +
       '<td class="num">' + fmtMoney(p.amount) + '</td>' +
+      '<td class="nowrap">' + clipFor('pay', p.id) + '</td>' +
       '<td>' + esc(p.note || '') + '</td>' +
-      '<td><button class="btn btn--sm" data-act="pay-edit" data-id="' + esc(p.id) + '" type="button">Правка</button></td>' +
+      '<td><div class="row-actions">' +
+        '<button class="btn btn--sm btn--primary" data-act="pay-files" data-id="' + esc(p.id) + '" type="button">Файлы</button>' +
+        '<button class="btn btn--sm" data-act="pay-edit" data-id="' + esc(p.id) + '" type="button">Правка</button>' +
+      '</div></td>' +
       '</tr>').join('') +
     '</tbody><tfoot><tr><td colspan="' + (o.hideCp ? 5 : 6) + '">Итого ' + rows.length + ' ' +
     plural(rows.length, 'оплата', 'оплаты', 'оплат') + '</td>' +
-    '<td class="num">' + fmtMoney(sum(rows, 'amount')) + '</td><td colspan="2"></td></tr></tfoot></table></div>';
+    '<td class="num">' + fmtMoney(sum(rows, 'amount')) + '</td><td colspan="3"></td></tr></tfoot></table></div>';
 }
 
 /* Под суммой счёта — сколько по нему уже пришло. Счёт закрывается
@@ -893,7 +944,7 @@ function viewCp() {
 
   const subs = [['summary', 'Сводка'], ['docs', 'Документы'], ['orders', 'Заказы'],
                 ['payments', 'Оплаты'], ['schedule', 'График'], ['price', 'Прайс-лист'],
-                ['contracts', 'Договоры'], ['card', 'Реквизиты']];
+                ['library', 'Документация'], ['contracts', 'Договоры'], ['card', 'Реквизиты']];
   const nav = '<nav class="tabs tabs--sub">' + subs.map((s) =>
     '<button class="tab' + (route.sub === s[0] ? ' tab--active' : '') + '" data-sub="' + s[0] + '" type="button">' +
     esc(s[1]) + '</button>').join('') + '</nav>';
@@ -907,6 +958,7 @@ function viewCp() {
       '<button class="btn" data-act="doc-new" data-cp="' + esc(c.id) + '" type="button">+ Документ</button>' +
       '<button class="btn" data-act="sched-new" data-cp="' + esc(c.id) + '" type="button">+ В график</button>' +
       '<button class="btn" data-sub="price" type="button">Прайс-лист</button>' +
+      '<button class="btn" data-sub="library" type="button">Документация</button>' +
     '</div></div>';
 
   let body = '';
@@ -916,6 +968,7 @@ function viewCp() {
   else if (route.sub === 'payments') body = cpPayments(c);
   else if (route.sub === 'schedule') body = cpSchedule(c);
   else if (route.sub === 'price') body = cpPrice(c);
+  else if (route.sub === 'library') body = cpLibrary(c);
   else if (route.sub === 'contracts') body = cpContracts(c);
   else body = cpCard(c);
 
@@ -1117,7 +1170,9 @@ function cpContracts(c) {
       '<td class="num">' + fmtMoney(b.paid) + '</td>' +
       '<td class="num">' + fmtMoney(b.debt) + '</td>' +
       '<td>' + esc(k.note || '') + '</td>' +
+      '<td class="nowrap">' + clipFor('contract', k.id) + '</td>' +
       '<td><div class="row-actions">' +
+        '<button class="btn btn--sm btn--primary" data-act="contract-files" data-cp="' + esc(c.id) + '" data-id="' + esc(k.id) + '" type="button">Файлы</button>' +
         '<button class="btn btn--sm" data-act="contract-edit" data-cp="' + esc(c.id) + '" data-id="' + esc(k.id) + '" type="button">Правка</button>' +
       '</div></td></tr>';
   }).join('');
@@ -1126,7 +1181,7 @@ function cpContracts(c) {
     c.contracts.length ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
       '<th>Название</th><th>Номер</th><th>Дата</th><th>Условия оплаты</th>' +
       '<th class="num">Выставлено</th><th class="num">Оплачено</th><th class="num">Долг</th>' +
-      '<th>Комментарий</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+      '<th>Комментарий</th><th>Файлы</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
       : emptyBox('Договоров нет'),
     { flush: c.contracts.length > 0,
       tools: '<button class="btn btn--primary btn--sm" data-act="contract-new" data-cp="' + esc(c.id) + '" type="button">+ Договор</button>',
@@ -1157,7 +1212,6 @@ function cpCard(c) {
    заказ. Одно другое не заменяет. */
 function cpPrice(c) {
   const items = priceItems(c);
-  const files = priceFiles(c);
 
   const table = items.length
     ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
@@ -1178,40 +1232,16 @@ function cpPrice(c) {
       '</tbody></table></div>'
     : emptyBox('Позиций пока нет — добавьте первую или возьмите их из присланного прайса');
 
-  const filesHTML = files.length
-    ? '<div class="files">' + files.map((f) =>
-        '<div class="file">' +
-          '<span class="file__icon">' + (/^image\//.test(f.type || '') ? 'IMG' : 'PDF') + '</span>' +
-          '<span class="file__body">' +
-            '<span class="file__name" title="' + esc(f.name) + '">' + esc(f.name) + '</span>' +
-            '<span class="file__meta">' + fmtSize(f.size) + ' · загружен ' + fmtDate(f.addedAt) +
-              (f.validFrom ? ' · действует с ' + fmtDate(f.validFrom) : '') + '</span>' +
-          '</span>' +
-          '<label class="field" style="min-width:170px"><span>Действует с</span>' +
-            '<input type="date" data-price-file-date="' + esc(f.id) + '" data-cp="' + esc(c.id) +
-            '" value="' + esc(f.validFrom || '') + '"></label>' +
-          '<span class="file__actions">' +
-            '<button class="btn btn--sm" data-act="price-file-open" data-cp="' + esc(c.id) + '" data-id="' + esc(f.id) + '" type="button">Открыть</button>' +
-            '<button class="btn btn--sm" data-act="price-file-save" data-cp="' + esc(c.id) + '" data-id="' + esc(f.id) + '" type="button">Скачать</button>' +
-            '<button class="btn btn--sm btn--danger" data-act="price-file-del" data-cp="' + esc(c.id) + '" data-id="' + esc(f.id) + '" type="button">Удалить</button>' +
-          '</span>' +
-        '</div>').join('') + '</div>'
-    : '';
-
   return card('Прайс-лист — ' + c.name, table + '<div style="margin-top:12px" class="row-actions">' +
       '<button class="btn btn--primary" data-act="price-add" data-cp="' + esc(c.id) + '" type="button">+ Позиция</button>' +
     '</div>',
     { note: 'Эти позиции подставляются в заказ: в карточке заказа есть кнопка «Из прайса». ' +
       'Цена и единица подтянутся, останется ввести количество.' }) +
-    card('Присланный прайс в PDF',
-      '<div class="drop" id="price-drop" data-cp="' + esc(c.id) + '" tabindex="0" role="button">' +
-        '<span class="drop__cat">' + catSVG() + '</span>' +
-        '<b>Перетащите сюда PDF или нажмите, чтобы выбрать</b>' +
-        'Можно хранить несколько версий — у каждой своя дата начала действия. ' +
-        'Принимаются PDF и фотографии, до ' + MAX_FILE_MB + '\u00a0МБ каждая.' +
-      '</div>' +
-      '<input type="file" id="price-file-input" accept="application/pdf,image/*" multiple hidden>' +
-      (filesHTML ? '<div style="margin-top:16px">' + filesHTML + '</div>' : ''),
+    card('Присланный прайс файлом',
+      attachBlock('price', c.id, c.id, {
+        title: 'Перетащите присланный прайс или нажмите, чтобы выбрать',
+        hint: 'Можно хранить несколько версий — видно, какая когда загружена. PDF, Excel, Word, фото.'
+      }),
       { note: 'Файл — то, на что ссылаются в переписке. Позиции выше нужны отдельно: из них собирается заказ.' });
 }
 
@@ -1299,6 +1329,10 @@ function viewOrderEdit() {
     '<div class="kpi-grid" id="order-kpis">' + orderKpisHTML(o) + '</div>' +
     card('Позиции заказа', items + '<div style="margin-top:12px">' + actions + '</div>',
       { note: 'Счёт и спецификация создаются на текущую сумму заказа и сразу попадают в историю документов контрагента.' }) +
+    card('Файлы заказа', attachBlock('order', o.id, o.cpId, {
+      title: 'Перетащите файлы заказа или нажмите, чтобы выбрать',
+      hint: 'Заявка от клиента, переписка, фото отгрузки, расчёт в Excel — всё, что относится к заказу.'
+    })) +
     '<div class="grid2">' +
       card('Документы по заказу', docs.length ? docTable(docs, { hideCp: true }) : emptyBox('Документов по заказу нет'),
         { flush: docs.length > 0 }) +
@@ -1660,7 +1694,6 @@ function viewCps() {
 /* ------------------------------------------------------------------ */
 function viewData() {
   const d = db();
-  const fileCount = allFileIds().length;
   const counts = [
     ['Контрагенты', d.counterparties.length],
     ['Договоры', allContracts().length],
@@ -1668,34 +1701,125 @@ function viewData() {
     ['Документы', d.documents.length],
     ['Оплаты', d.payments.length],
     ['Строки графика', d.schedule.length],
-    ['Вложенные файлы', fileCount]
+    ['Вложенные файлы', allFiles().length]
   ];
   return card('Что сейчас в базе',
-    '<div class="kpi-grid" style="margin:0">' + counts.map((c) => kpi(c[0], String(c[1]), '')).join('') + '</div>') +
-    card('Перенос и резервная копия',
-      '<p class="hint" style="margin-top:0">Данные лежат в этом браузере на этом устройстве. Чтобы перенести их на другой ' +
-      'компьютер или телефон — выгрузите файл и загрузите его там. Файл обычный JSON, его можно хранить в облаке как резервную копию.</p>' +
+    '<div class="kpi-grid" style="margin:0">' + counts.map((c) => kpi(c[0], String(c[1]), '')).join('') + '</div>',
+    { note: 'Последнее сохранение: ' + fmtDateTime(storedAt()) + '. Данные лежат на этом компьютере, ' +
+      'в папке <b id="data-dir">…</b>.' }) +
+    card('Резервная копия и перенос',
+      '<p class="hint" style="margin-top:0">Всё хранится в папке <code>data</code> рядом с программой: ' +
+      'в ней и записи, и сами файлы. Чтобы сделать полную копию или переехать на другой компьютер, ' +
+      'скопируйте эту папку целиком — больше ничего не нужно.</p>' +
+      '<p class="hint">Выгрузка ниже сохраняет только записи и опись вложений: она маленькая, ' +
+      'годится как частый снимок состояния и для переноса справочников.</p>' +
       '<div class="row-actions" style="margin-top:12px">' +
-        '<button class="btn btn--primary" data-act="export" type="button">Выгрузить данные</button>' +
-        '<button class="btn" data-act="export-files" type="button">Выгрузить вместе со сканами</button>' +
+        '<button class="btn btn--primary" data-act="export" type="button">Выгрузить записи</button>' +
         '<button class="btn" data-act="import-replace" type="button">Загрузить из файла (заменить)</button>' +
         '<button class="btn" data-act="import-merge" type="button">Загрузить и добавить к текущим</button>' +
         '<button class="btn" data-act="print" type="button">Печать текущего экрана</button>' +
       '</div>' +
-      '<p class="hint" style="margin-bottom:0">Обычная выгрузка — только записи, она небольшая. ' +
-      'Выгрузка со сканами вкладывает и сами PDF, файл получается во столько же раз тяжелее — ' +
-      'это полная копия, которой поднимается работа на другом устройстве. ' +
-      'Сейчас в хранилище <b id="files-size">считаем…</b>.</p>' +
+      '<p class="hint" style="margin-bottom:0">Сейчас занято: <b id="files-size">считаем…</b>.</p>' +
       '<input type="file" id="import-file" accept=".json,application/json" hidden>') +
     card('Очистка',
-      '<p class="hint" style="margin-top:0">Перед очисткой выгрузите файл — восстановить удалённое иначе не получится.</p>' +
+      '<p class="hint" style="margin-top:0">Перед очисткой скопируйте папку <code>data</code> — ' +
+      'восстановить удалённое иначе не получится. Отдельные правки можно откатить во вкладке «История».</p>' +
       '<div class="row-actions" style="margin-top:12px">' +
         '<button class="btn" data-act="files-cleanup" type="button">Убрать забытые файлы</button>' +
         '<button class="btn btn--danger" data-act="reset-empty" type="button">Очистить всё и начать с нуля</button>' +
         '<button class="btn btn--danger" data-act="reset-sample" type="button">Вернуть демонстрационный пример</button>' +
       '</div>' +
-      '<p class="hint" style="margin-bottom:0">Забытые файлы — это вложения документов, которые удалили в обход ' +
-      'платформы, например загрузкой чужой копии данных. Записи они не трогают, только освобождают место.</p>');
+      '<p class="hint" style="margin-bottom:0">Забытые файлы — вложения записей, которых больше нет. ' +
+      'Записи они не трогают, только освобождают место на диске.</p>');
+}
+
+/* ------------------------------------------------------------------ */
+/* История правок                                                     */
+/* ------------------------------------------------------------------ */
+/* Сервер сохраняет состояние перед каждой правкой, поэтому здесь видно,
+   что и когда менялось, и можно вернуться к любому снимку. */
+let historyRows = null;
+
+function viewHistory() {
+  if (historyRows === null) {
+    loadHistory();
+    return card('История правок', emptyBox('Загружаем историю…'));
+  }
+  if (!historyRows.length) {
+    return card('История правок', emptyBox('Правок пока нет — история начнёт заполняться с первой записи'));
+  }
+  const rows = historyRows.map((r) =>
+    '<tr>' +
+      '<td class="nowrap">' + fmtDateTime(r.created_at) + '<div class="hint">' + esc(fmtAgo(r.created_at)) + '</div></td>' +
+      '<td>' + (r.event ? esc(r.event) : '<span class="hint">без описания</span>') + '</td>' +
+      '<td class="num">' + (r.restorable ? fmtSize(r.size) : '<span class="hint">—</span>') + '</td>' +
+      '<td>' + (r.restorable
+        ? '<button class="btn btn--sm" data-act="history-restore" data-id="' + r.id +
+          '" type="button">Вернуть это состояние</button>'
+        : '<span class="hint">файл, возврату не подлежит</span>') + '</td>' +
+    '</tr>').join('');
+
+  return card('История правок',
+    '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+      '<th>Когда</th><th>Что менялось</th><th class="num">Размер снимка</th><th></th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>',
+    { flush: true,
+      note: 'Каждая строка — состояние базы до соответствующей правки. «Вернуть» подставит его целиком; ' +
+        'текущее состояние при этом тоже попадёт в историю, так что откат можно отменить. ' +
+        'Вложенные файлы история не затрагивает — они остаются на диске.' });
+}
+
+function loadHistory() {
+  fetch('/api/history?limit=200').then((res) => res.json()).then((body) => {
+    historyRows = body.revisions || [];
+    if (route.view === 'history') render();
+  }).catch(() => { historyRows = []; });
+}
+
+/* ------------------------------------------------------------------ */
+/* База документации контрагента                                      */
+/* ------------------------------------------------------------------ */
+/* Все файлы, которые относятся к контрагенту, в одном месте: и сканы
+   документов, и прайсы, и переписка, и то, что положили прямо сюда. */
+function cpLibrary(c) {
+  const all = filesOfCp(c.id);
+  const needle = (filters.search || '').trim().toLowerCase();
+  const rows = all.filter((f) => {
+    if (filters.status && f.ownerKind !== filters.status) return false;
+    if (needle && f.name.toLowerCase().indexOf(needle) < 0) return false;
+    return true;
+  });
+
+  const byKind = Object.keys(OWNER_TITLES).map((k) => ({
+    key: k, label: OWNER_TITLES[k], n: all.filter((f) => f.ownerKind === k).length
+  })).filter((x) => x.n);
+
+  const totalBytes = all.reduce((sum, f) => sum + (Number(f.size) || 0), 0);
+
+  return '<div class="filters">' +
+      '<label class="field"><span>Откуда файл</span><select data-filter="status">' +
+        selectOptions([['', 'Отовсюду']].concat(byKind.map((x) => [x.key, x.label + ' (' + x.n + ')'])), filters.status) +
+      '</select></label>' +
+      '<label class="field" style="min-width:230px"><span>Поиск по имени</span>' +
+        '<input type="search" data-filter="search" value="' + esc(filters.search || '') + '" placeholder="договор, счёт, акт…"></label>' +
+      '<button class="btn" data-act="filters-reset" type="button">Сбросить</button>' +
+    '</div>' +
+    '<div class="kpi-grid">' +
+      kpi('Всего файлов', String(all.length), 'по контрагенту ' + c.name) +
+      kpi('Занимают', fmtSize(totalBytes), 'на диске этого компьютера') +
+      kpi('Показано', String(rows.length), 'по текущему фильтру') +
+    '</div>' +
+    card('Положить файл сюда',
+      attachBlock('cp', c.id, c.id, {
+        title: 'Перетащите файлы или нажмите, чтобы выбрать',
+        hint: 'Сюда кладут то, что не привязано к конкретному документу: переписку, доверенности, фото, скриншоты.'
+      })) +
+    card('Вся документация — ' + c.name,
+      rows.length
+        ? '<div class="files">' + rows.map((f) => fileRowHTML(f, { showOwner: true })).join('') + '</div>'
+        : emptyBox('По этому фильтру файлов нет'),
+      { note: 'Файлы из всех разделов контрагента: сканы документов, прайсы, вложения заказов, ' +
+        'договоров и оплат. Рядом с каждым написано, откуда он.' });
 }
 
 /* ------------------------------------------------------------------ */
@@ -1719,10 +1843,10 @@ function formCounterparty(cpId) {
       { name: 'note', label: 'Заметки', type: 'textarea', value: c && c.note, wide: true }
     ],
     onSave: (v) => {
-      if (c) { upsert('counterparties', Object.assign({}, v, { id: c.id })); }
+      if (c) { upsert('counterparties', Object.assign({}, v, { id: c.id }), 'cp', 'Изменён контрагент ' + v.name); }
       else {
-        const item = Object.assign({}, v, { contracts: [] });
-        upsert('counterparties', item, 'cp');
+        const item = Object.assign({}, v, { contracts: [], priceItems: [] });
+        upsert('counterparties', item, 'cp', 'Добавлен контрагент ' + v.name);
         /* Новому контрагенту сразу открываем его вкладку: следующий шаг —
            завести договор */
         route = { view: 'cp', cpId: item.id, sub: 'contracts', orderId: '' };
@@ -1751,7 +1875,7 @@ function formContract(cpId, contractId) {
     onSave: (v) => {
       if (k) Object.assign(k, v);
       else c.contracts.push(Object.assign({ id: uid('k') }, v));
-      save();
+      save((k ? 'Изменён договор ' : 'Добавлен договор ') + v.name + ' — ' + c.name);
     },
     onDelete: k ? () => removeContract(cpId, contractId) : null
   });
@@ -1779,8 +1903,15 @@ function formPayment(payId, preset) {
       { name: 'note', label: 'Комментарий', type: 'textarea', value: p && p.note, wide: true }
     ],
     validate: (v) => (Number(v.amount) > 0 ? null : 'Сумма оплаты должна быть больше нуля'),
-    onSave: (v) => { upsert('payments', p ? Object.assign({}, v, { id: p.id }) : v, 'pay'); },
-    onDelete: p ? () => remove('payments', p.id) : null
+    onSave: (v) => {
+      upsert('payments', p ? Object.assign({}, v, { id: p.id }) : v, 'pay',
+        (p ? 'Изменена оплата ' : 'Добавлена оплата ') + fmtMoney(v.amount, { bare: true }) +
+        ' ₽ — ' + cpName(v.cpId));
+    },
+    onDelete: p ? () => {
+      remove('payments', p.id, 'Удалена оплата ' + fmtMoney(p.amount, { bare: true }) + ' ₽ — ' + cpName(p.cpId));
+      dropFilesOf('pay', p.id);
+    } : null
   });
 }
 
@@ -1804,8 +1935,12 @@ function formSchedule(schedId, preset) {
       { name: 'note', label: 'Комментарий', type: 'textarea', value: s && s.note, wide: true }
     ],
     validate: (v) => (Number(v.amount) > 0 ? null : 'Сумма должна быть больше нуля'),
-    onSave: (v) => { upsert('schedule', s ? Object.assign({}, v, { id: s.id }) : v, 'sch'); },
-    onDelete: s ? () => remove('schedule', s.id) : null
+    onSave: (v) => {
+      upsert('schedule', s ? Object.assign({}, v, { id: s.id }) : v, 'sch',
+        (s ? 'Изменён плановый платёж на ' : 'Добавлен плановый платёж на ') + fmtDate(v.dueDate) +
+        ' — ' + cpName(v.cpId));
+    },
+    onDelete: s ? () => remove('schedule', s.id, 'Удалён плановый платёж — ' + cpName(s.cpId)) : null
   });
 }
 
@@ -1831,7 +1966,9 @@ function formDocument(docId, preset) {
     ],
     onSave: (v) => {
       /* Вложения остаются при документе: форма их не трогает */
-      upsert('documents', x ? Object.assign({}, v, { id: x.id, files: docFiles(x) }) : Object.assign(v, { files: [] }), 'doc');
+      upsert('documents', x ? Object.assign({}, v, { id: x.id }) : v, 'doc',
+        (x ? 'Изменён документ ' : 'Добавлен документ ') + (DOC_TYPES[v.type] || '') +
+        ' №' + (v.number || '—') + ' — ' + cpName(v.cpId));
     },
     onDelete: x ? () => removeDocument(x.id) : null
   });
@@ -1850,7 +1987,7 @@ function newOrder(cpId) {
     contractId: (cp.contracts[0] || {}).id || '',
     number: String(next), date: today(), status: 'draft', shipDate: '', note: '', items: []
   };
-  upsert('orders', order, 'ord');
+  upsert('orders', order, 'ord', 'Создан заказ ' + order.number + ' — ' + cp.name);
   route = { view: 'order', cpId: '', sub: '', orderId: order.id };
   render();
 }
@@ -1858,50 +1995,6 @@ function newOrder(cpId) {
 /* ------------------------------------------------------------------ */
 /* Загрузка прайса и подстановка позиций в заказ                      */
 /* ------------------------------------------------------------------ */
-function addPriceFiles(cpId, fileList) {
-  const c = cpById(cpId);
-  const files = Array.prototype.slice.call(fileList || []);
-  if (!c || !files.length) return;
-  const tooBig = files.filter((f) => f.size > MAX_FILE_MB * 1048576);
-  if (tooBig.length) {
-    alert('Слишком большие файлы (больше ' + MAX_FILE_MB + ' МБ):\n' +
-          tooBig.map((f) => f.name).join('\n'));
-  }
-  const ok = files.filter((f) => f.size <= MAX_FILE_MB * 1048576);
-  Promise.all(ok.map((f) => {
-    const id = uid('file');
-    return filePut(id, f).then(() => {
-      priceFiles(c).push({
-        id: id, name: f.name, size: f.size, type: f.type || 'application/pdf',
-        addedAt: today(), validFrom: '', note: ''
-      });
-    });
-  })).then(() => { save(); render(); })
-    .catch((e) => alert('Не удалось сохранить файл: ' + e.message));
-}
-
-function bindPriceDrop() {
-  const drop = document.getElementById('price-drop');
-  const input = document.getElementById('price-file-input');
-  if (!drop || !input) return;
-  const cpId = drop.getAttribute('data-cp');
-
-  drop.addEventListener('click', () => input.click());
-  drop.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
-  });
-  input.addEventListener('change', () => { addPriceFiles(cpId, input.files); input.value = ''; });
-
-  /* Гасим поведение браузера: иначе он откроет файл поверх страницы */
-  ['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => {
-    e.preventDefault(); drop.classList.add('drop--over');
-  }));
-  ['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => {
-    e.preventDefault(); drop.classList.remove('drop--over');
-  }));
-  drop.addEventListener('drop', (e) => addPriceFiles(cpId, e.dataTransfer && e.dataTransfer.files));
-}
-
 /* Набор заказа из прайса: отмечаем позиции и сразу задаём количество.
    Цена подставляется из прайса, но остаётся редактируемой в заказе —
    договорная скидка не должна править сам прайс. */
@@ -1992,6 +2085,7 @@ function render() {
   else if (route.view === 'payments') html = viewPayments();
   else if (route.view === 'docs') html = viewDocs();
   else if (route.view === 'analytics') html = viewAnalytics();
+  else if (route.view === 'history') html = viewHistory();
   else if (route.view === 'data') html = viewData();
   else html = viewDash();
 
@@ -2003,17 +2097,25 @@ function render() {
     if (host) job.draw(host);
   });
 
-  /* Зона загрузки прайса живёт прямо на странице, а не в окне, и
-     пересобирается вместе с ней — обработчики вешаются после отрисовки */
-  bindPriceDrop();
+  /* Зоны перетаскивания живут прямо на страницах и пересобираются вместе
+     с ними — слушатели вешаются после каждой отрисовки */
+  bindDrops();
 
-  /* Вес хранилища файлов читается из IndexedDB, то есть не сразу —
+  /* Сведения о хранилище приходят от сервера, то есть не сразу —
      подставляем, когда ответ придёт, и только если экран ещё тот же */
   const sizeBox = document.getElementById('files-size');
-  if (sizeBox) {
-    filesTotalSize()
-      .then((bytes) => { if (sizeBox.isConnected) sizeBox.textContent = fmtSize(bytes); })
-      .catch(() => { if (sizeBox.isConnected) sizeBox.textContent = 'нет доступа'; });
+  const dirBox = document.getElementById('data-dir');
+  if (sizeBox || dirBox) {
+    storageInfo().then((info) => {
+      if (sizeBox && sizeBox.isConnected) {
+        sizeBox.textContent = fmtSize(info.bytes) + ' в ' + info.files + ' ' +
+          plural(info.files, 'файле', 'файлах', 'файлах') + ', база ' + fmtSize(info.dbBytes) +
+          ', версий в истории ' + info.revisions;
+      }
+      if (dirBox && dirBox.isConnected) dirBox.textContent = info.dataDir;
+    }).catch(() => {
+      if (sizeBox && sizeBox.isConnected) sizeBox.textContent = 'сервер не отвечает';
+    });
   }
 }
 
@@ -2039,7 +2141,7 @@ function handleAction(act, node) {
 
   switch (act) {
     case 'filters-reset':
-      filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '', scan: '' };
+      filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '', scan: '', search: '' };
       render(); return;
 
     case 'toggle-table': {
@@ -2054,8 +2156,8 @@ function handleAction(act, node) {
     case 'cp-new': formCounterparty(''); return;
     case 'cp-edit': formCounterparty(id); return;
     case 'cp-del':
-      if (confirm('Удалить контрагента вместе со всеми его заказами, документами и оплатами?\n\nДействие нельзя отменить.')) {
-        removeCounterparty(id); go('cps');
+      if (confirm('Удалить контрагента вместе со всеми его заказами, документами, оплатами и файлами?\n\nОткатить можно во вкладке «История», но файлы вернуть не получится.')) {
+        removeCounterparty(id).then(() => go('cps'));
       }
       return;
     case 'contract-new': formContract(cp, ''); return;
@@ -2074,19 +2176,48 @@ function handleAction(act, node) {
       formPayment('', { cpId: s.cpId, contractId: s.contractId, orderId: s.orderId,
                         amount: s.amount, method: s.method });
       s.status = 'paid';
-      save();
+      save('Плановый платёж отмечен оплаченным — ' + cpName(s.cpId));
       return;
     }
     case 'doc-new': formDocument('', { cpId: cp }); return;
     case 'doc-edit': formDocument(id); return;
-    case 'doc-files': openFilesModal(id); return;
+    case 'doc-files': {
+      const d2 = db().documents.find((x) => x.id === id);
+      if (!d2) return;
+      openAttachModal('doc', d2.id, d2.cpId,
+        'Файлы: ' + (DOC_TYPES[d2.type] || d2.type) + ' №' + (d2.number || '—'),
+        cpName(d2.cpId) + ' · ' + fmtDate(d2.date) +
+          (Number(d2.amount) ? ' · ' + fmtMoney(d2.amount) : ''));
+      return;
+    }
+    case 'contract-files': {
+      const c2 = cpById(cp);
+      const k = c2 && (c2.contracts || []).find((x) => x.id === id);
+      if (!k) return;
+      openAttachModal('contract', k.id, c2.id, 'Файлы договора: ' + k.name,
+        c2.name + ' · №' + (k.number || '—') + ' от ' + fmtDate(k.date));
+      return;
+    }
+    case 'pay-files': {
+      const p2 = db().payments.find((x) => x.id === id);
+      if (!p2) return;
+      openAttachModal('pay', p2.id, p2.cpId, 'Файлы оплаты от ' + fmtDate(p2.date),
+        cpName(p2.cpId) + ' · ' + fmtMoney(p2.amount) + ' · ' + (PAY_METHODS[p2.method] || {}).label);
+      return;
+    }
+    case 'file-del': {
+      const meta = fileById(id);
+      if (!meta || !confirm('Удалить файл «' + meta.name + '»?')) return;
+      deleteFileApi(meta.id).then(render).catch((e) => alert('Не удалось удалить: ' + e.message));
+      return;
+    }
 
     /* Прайс-лист */
     case 'price-add': {
       const c = cpById(cp);
       if (!c) return;
       priceItems(c).push({ id: uid('pi'), article: '', name: '', unit: 'шт', price: 0, note: '' });
-      save(); render();
+      save('Добавлена позиция прайса — ' + c.name); render();
       const inputs = document.querySelectorAll('[data-price][data-field="name"]');
       if (inputs.length) inputs[inputs.length - 1].focus();
       return;
@@ -2095,28 +2226,7 @@ function handleAction(act, node) {
       const c = cpById(cp);
       if (!c) return;
       c.priceItems = priceItems(c).filter((x) => x.id !== id);
-      save(); render(); return;
-    }
-    case 'price-file-open':
-    case 'price-file-save': {
-      const c = cpById(cp);
-      const meta = c && priceFiles(c).find((x) => x.id === id);
-      fileGet(id).then((blob) => {
-        if (!blob) { alert('Файл не найден в хранилище — возможно, он был удалён.'); return; }
-        openBlob(blob, meta && meta.name, act === 'price-file-save');
-      }).catch((e) => alert('Не удалось прочитать файл: ' + e.message));
-      return;
-    }
-    case 'price-file-del': {
-      const c = cpById(cp);
-      if (!c) return;
-      const f = priceFiles(c).find((x) => x.id === id);
-      if (!confirm('Удалить файл «' + (f ? f.name : '') + '»?')) return;
-      fileDel(id).catch(() => null).then(() => {
-        c.priceFiles = priceFiles(c).filter((x) => x.id !== id);
-        save(); render();
-      });
-      return;
+      save('Убрана позиция прайса — ' + c.name); render(); return;
     }
     case 'order-price-pick': {
       const o = orderById(route.orderId);
@@ -2133,8 +2243,7 @@ function handleAction(act, node) {
         db().documents.forEach((d) => { if (d.orderId === id) d.orderId = ''; });
         db().payments.forEach((p) => { if (p.orderId === id) p.orderId = ''; });
         db().schedule.forEach((s) => { if (s.orderId === id) s.orderId = ''; });
-        remove('orders', id);
-        go('orders');
+        removeOrder(id).then(() => go('orders'));
       }
       return;
 
@@ -2142,7 +2251,7 @@ function handleAction(act, node) {
       const o = orderById(route.orderId);
       if (!o) return;
       o.items.push({ id: uid('it'), name: '', unit: 'шт', qty: 1, price: 0 });
-      save(); render();
+      save('Добавлена позиция в заказ ' + (o.number || '')); render();
       /* Курсор — в название новой позиции, чтобы сразу печатать */
       const inputs = document.querySelectorAll('[data-field="name"]');
       if (inputs.length) inputs[inputs.length - 1].focus();
@@ -2152,7 +2261,7 @@ function handleAction(act, node) {
       const o = orderById(route.orderId);
       if (!o) return;
       o.items = o.items.filter((it) => it.id !== id);
-      save(); render(); return;
+      save('Убрана позиция из заказа ' + (o.number || '')); render(); return;
     }
 
     case 'order-make-doc': {
@@ -2193,21 +2302,20 @@ function handleAction(act, node) {
       downloadFile('платформа-продаж-' + today() + '.json', exportJSON());
       return;
     }
-    case 'export-files': {
-      node.disabled = true;
-      const was = node.textContent;
-      node.textContent = 'Собираем…';
-      exportWithFiles().then((text) => {
-        downloadFile('платформа-продаж-со-сканами-' + today() + '.json', text);
-      }).catch((e) => alert('Не удалось собрать выгрузку: ' + e.message))
-        .then(() => { node.disabled = false; node.textContent = was; });
-      return;
-    }
     case 'files-cleanup': {
-      filesCleanup(allFileIds()).then((n) => {
+      cleanupFiles(liveOwners()).then((n) => {
         alert(n ? 'Убрано файлов: ' + n : 'Забытых файлов нет — всё на месте.');
         render();
       }).catch((e) => alert('Не удалось почистить хранилище: ' + e.message));
+      return;
+    }
+    case 'history-restore': {
+      if (!confirm('Вернуть это состояние?\n\nТекущее тоже сохранится в истории, так что откат можно отменить.')) return;
+      fetch('/api/history/' + encodeURIComponent(id) + '/restore', { method: 'POST' })
+        .then((res) => (res.ok ? res.json() : Promise.reject(new Error('сервер ответил ' + res.status))))
+        .then(() => loadState())
+        .then(() => { historyRows = null; go('history'); })
+        .catch((e) => alert('Не удалось вернуть версию: ' + e.message));
       return;
     }
     case 'import-replace':
@@ -2219,11 +2327,9 @@ function handleAction(act, node) {
         const reader = new FileReader();
         reader.onload = () => {
           try {
-            const done = importJSON(String(reader.result), act === 'import-merge' ? 'merge' : 'replace');
-            Promise.resolve(done).then((n) => {
-              alert(n ? 'Данные загружены, восстановлено файлов: ' + n : 'Данные загружены.');
-              go('dash');
-            });
+            Promise.resolve(importJSON(String(reader.result), act === 'import-merge' ? 'merge' : 'replace'))
+              .then(() => { historyRows = null; alert('Данные загружены.'); go('dash'); })
+              .catch((e) => alert('Не удалось сохранить загруженное: ' + e.message));
           } catch (e) {
             alert('Не удалось прочитать файл: ' + e.message);
           }
@@ -2236,15 +2342,19 @@ function handleAction(act, node) {
     }
     case 'print': window.print(); return;
     case 'reset-empty':
-      if (confirm('Удалить все данные и вложенные файлы без возможности восстановления?')) {
-        resetAll(false);
-        filesCleanup([]).catch(() => null).then(() => go('dash'));
+      if (confirm('Удалить все записи и вложенные файлы?\n\nПапку data можно скопировать заранее — тогда всё восстановимо.')) {
+        resetAll(false)
+          .then(() => cleanupFiles(liveOwners()))
+          .then(() => { historyRows = null; go('dash'); })
+          .catch((e) => alert('Не удалось очистить: ' + e.message));
       }
       return;
     case 'reset-sample':
       if (confirm('Заменить текущие данные демонстрационным примером? Вложенные файлы будут удалены.')) {
-        resetAll(true);
-        filesCleanup([]).catch(() => null).then(() => go('dash'));
+        resetAll(true)
+          .then(() => cleanupFiles(liveOwners()))
+          .then(() => { historyRows = null; go('dash'); })
+          .catch((e) => alert('Не удалось вернуть пример: ' + e.message));
       }
       return;
 
@@ -2329,8 +2439,8 @@ function applyTheme(theme) {
 }
 
 function init() {
-  load();
-
+  /* Выбранная тема — настройка этого браузера, а не общие данные, поэтому
+     она и остаётся в браузере. Записи приходят с сервера ниже. */
   let theme = 'dark';
   try { theme = localStorage.getItem('sales-platform-theme') || 'dark'; } catch (e) { theme = 'dark'; }
   applyTheme(theme);
@@ -2349,6 +2459,7 @@ function init() {
       const view = nav.getAttribute('data-nav');
       const cpId = nav.getAttribute('data-cp') || '';
       if (view === 'cp') { route = { view: 'cp', cpId: cpId, sub: 'summary', orderId: '' }; window.scrollTo({ top: 0 }); render(); }
+      else if (view === 'history') { historyRows = null; go('history'); }
       else go(view);
       return;
     }
@@ -2373,11 +2484,11 @@ function init() {
 
     /* Списки заказа меняют состав зависимых полей, поэтому здесь нужна
        полная перерисовка: выбор в select виден сразу, терять ввод нечему. */
-    const pf = e.target.closest('[data-price-file-date]');
-    if (pf) {
-      const c = cpById(pf.getAttribute('data-cp'));
-      const f = c && priceFiles(c).find((x) => x.id === pf.getAttribute('data-price-file-date'));
-      if (f) { f.validFrom = pf.value; save(); }
+    const fk = e.target.closest('[data-file-kind]');
+    if (fk) {
+      updateFileMeta(fk.getAttribute('data-file-kind'), { kind: fk.value })
+        .then(render)
+        .catch((err) => alert('Не удалось сохранить отметку: ' + err.message));
       return;
     }
 
@@ -2388,7 +2499,7 @@ function init() {
       const key = of.getAttribute('data-order-field');
       o[key] = of.value;
       if (key === 'cpId') o.contractId = '';
-      save(); render();
+      save('Изменён заказ ' + (o.number || '')); render();
     }
   });
 
@@ -2452,7 +2563,20 @@ function init() {
     }, 180);
   });
 
-  render();
+  /* Данные приходят с локального сервера, поэтому экран собирается после
+     ответа. Если сервер не отвечает — объясняем, что делать. */
+  const main = document.getElementById('main');
+  main.innerHTML = '<div class="empty">Загружаем данные…</div>';
+  loadState().then(() => {
+    render();
+  }).catch((e) => {
+    main.innerHTML = '<article class="card"><div class="card__body">' +
+      '<h2 style="margin-bottom:10px">Нет связи с программой</h2>' +
+      '<p class="hint">' + esc(e.message) + '</p>' +
+      '<p class="hint">Проверьте, что окно, в котором запущена платформа, ещё открыто. ' +
+      'Если вы его закрыли — запустите платформу заново и обновите страницу.</p>' +
+      '</div></article>';
+  });
 }
 
 document.addEventListener('DOMContentLoaded', init);
