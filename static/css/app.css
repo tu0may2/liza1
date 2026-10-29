@@ -1,9 +1,9 @@
-/* Платформа продаж — глубокая зелень и винный акцент.
+/* Платформа продаж — синяя основа, зелень и вино на акцентах.
 
-   Палитра взята из заданных образцов: шкала 051F20 → DAF1DE держит
-   поверхности и текст, малиновый C50337 и бордо 6B1E23 работают акцентом,
-   как красные розы на тёмной листве. Ничего постороннего в палитре нет —
-   все оттенки получены из этих цветов.
+   Основной цвет синий: на шкале 0A1B2E → F2F6FB держатся поверхности,
+   текст и действия. Зелёная шкала 051F20 → DAF1DE и малиновый C50337
+   с бордо 6B1E23 из второго набора образцов работают на акцентах:
+   состояния, метки и цвета серий на графиках.
 
    Шрифты лежат в папке рядом, а не грузятся из сети: платформа должна
    открываться без интернета. Oranienbaum — заголовки и крупные числа,
@@ -49,6 +49,17 @@
 
 :root {
   /* Заданные образцы, как есть */
+  --navy-01: #0a1b2e;
+  --navy-02: #112a46;
+  --navy-03: #1b3b5a;
+  --navy-04: #34506d;
+  --navy-05: #557392;
+  --navy-06: #7a8ca6;
+  --navy-07: #a1b2c4;
+  --navy-08: #c4d2e1;
+  --navy-09: #e1e8f0;
+  --navy-10: #f2f6fb;
+
   --green-01: #051f20;
   --green-02: #0b2b26;
   --green-03: #163832;
@@ -70,37 +81,38 @@
 
 /* Тёмная тема — по умолчанию */
 :root {
-  --bg: #051f20;
-  --bg-elev: #0b2b26;
-  --bg-elev-2: #163832;
-  --bg-sunken: #02060e;
-  --border: rgba(142, 182, 155, 0.17);
-  --border-soft: rgba(142, 182, 155, 0.09);
-  --border-lit: rgba(142, 182, 155, 0.32);
+  --bg: #050c16;
+  --bg-elev: #0c1b2e;
+  --bg-elev-2: #132a45;
+  --bg-sunken: #040a12;
+  --border: rgba(196, 210, 225, 0.11);
+  --border-soft: rgba(196, 210, 225, 0.06);
+  --border-lit: rgba(196, 210, 225, 0.20);
 
-  --text: #daf1de;
-  --text-dim: #8eb69b;
-  --text-mute: rgba(142, 182, 155, 0.68);
+  --text: #f2f6fb;
+  --text-dim: #a1b2c4;
+  --text-mute: #7a8ca6;
 
-  /* Малиновый — единственный яркий цвет интерфейса */
-  --accent: #c50337;
-  --accent-strong: #e0244d;
-  --accent-soft: rgba(197, 3, 55, 0.18);
-  --accent-contrast: #fff4f6;
-  --glow: #e0244d;
-  --glow-soft: rgba(224, 36, 77, 0.17);
-  --glow-edge: rgba(224, 36, 77, 0.48);
+  /* Синий ведёт интерфейс: им отмечено то, что можно нажать */
+  --accent: #3d9bff;
+  --accent-strong: #6cb4ff;
+  --accent-soft: rgba(61, 155, 255, 0.14);
+  --accent-contrast: #04101f;
+  --glow: #3d9bff;
+  --glow-soft: rgba(61, 155, 255, 0.16);
+  --glow-edge: rgba(61, 155, 255, 0.45);
 
+  /* Состояния взяты из второго набора образцов: шалфей, малина, бордо */
   --up: #8eb69b;
   --down: #e8486a;
   --warn: #ff9799;
-  --info: #daf1de;
+  --info: #6cb4ff;
 
-  --shadow: rgba(2, 6, 14, 0.58);
-  --surface-chart: #0b2b26;
+  --shadow: rgba(2, 6, 14, 0.55);
+  --surface-chart: #0c1b2e;
 
   /* Стекло карточки: светлая кромка поверх градиента из двух нижних ступеней */
-  --glass: linear-gradient(160deg, rgba(22, 56, 50, 0.62), rgba(11, 43, 38, 0.86));
+  --glass: linear-gradient(160deg, rgba(27, 59, 90, 0.42), rgba(10, 27, 46, 0.72));
   --glass-blur: 14px;
 
   /* Цвета серий.
@@ -119,40 +131,40 @@
   --s3: #ff9799;
   --s4: #ffcfcf;
 
-  --grid: rgba(142, 182, 155, 0.16);
+  --grid: rgba(156, 171, 198, 0.17);
 }
 
-/* Светлая тема — верхние ступени той же шкалы, бордо вместо свечения */
+/* Светлая тема — верхние ступени синей шкалы, без свечения */
 :root[data-theme="light"] {
-  --bg: #daf1de;
-  --bg-elev: #f3fbf4;
-  --bg-elev-2: #e3f3e7;
-  --bg-sunken: #cfe8d6;
-  --border: rgba(35, 83, 71, 0.20);
-  --border-soft: rgba(35, 83, 71, 0.11);
-  --border-lit: rgba(35, 83, 71, 0.36);
+  --bg: #e9eff7;
+  --bg-elev: #ffffff;
+  --bg-elev-2: #e1e8f0;
+  --bg-sunken: #f2f6fb;
+  --border: #c6d2e3;
+  --border-soft: #dae2ee;
+  --border-lit: #a1b2c4;
 
-  --text: #051f20;
-  --text-dim: #235347;
-  --text-mute: #4d7566;
+  --text: #0f1b2e;
+  --text-dim: #44556f;
+  --text-mute: #687a95;
 
-  --accent: #c50337;
-  --accent-strong: #9c022c;
-  --accent-soft: rgba(197, 3, 55, 0.10);
-  --accent-contrast: #fff4f6;
-  --glow: #c50337;
-  --glow-soft: rgba(197, 3, 55, 0.12);
-  --glow-edge: rgba(197, 3, 55, 0.40);
+  --accent: #1f5fb0;
+  --accent-strong: #174a8c;
+  --accent-soft: rgba(31, 95, 176, 0.11);
+  --accent-contrast: #ffffff;
+  --glow: #1f5fb0;
+  --glow-soft: rgba(31, 95, 176, 0.12);
+  --glow-edge: rgba(31, 95, 176, 0.40);
 
   --up: #235347;
   --down: #c50337;
   --warn: #6b1e23;
-  --info: #4d7566;
+  --info: #1f5fb0;
 
-  --shadow: rgba(5, 31, 32, 0.13);
-  --surface-chart: #f3fbf4;
+  --shadow: rgba(15, 27, 46, 0.14);
+  --surface-chart: #ffffff;
 
-  --glass: #f3fbf4;
+  --glass: #ffffff;
   --glass-blur: 0px;
 
   /* Свои шаги под светлую подложку — проверены тем же скриптом */
@@ -163,7 +175,7 @@
   --s3: #da4051;
   --s4: #f47a7f;
 
-  --grid: rgba(35, 83, 71, 0.18);
+  --grid: rgba(68, 85, 111, 0.19);
 }
 
 * { box-sizing: border-box; }
@@ -180,13 +192,13 @@ body {
 }
 
 /* Подсветка фона: тёплое пятно сверху справа и глубокая тень снизу слева —
-   тот же свет, что падает на листву в образцах. На светлой теме выключена. */
+   холодное пятно сверху и глубокая тень снизу. На светлой теме выключена. */
 body::before {
   content: '';
   position: fixed; inset: 0; z-index: -1; pointer-events: none;
   background:
-    radial-gradient(900px 620px at 88% -10%, rgba(197, 3, 55, 0.16), transparent 62%),
-    radial-gradient(760px 540px at 2% 104%, rgba(35, 83, 71, 0.50), transparent 64%);
+    radial-gradient(900px 620px at 88% -10%, rgba(61, 155, 255, 0.20), transparent 62%),
+    radial-gradient(760px 540px at 2% 104%, rgba(27, 59, 90, 0.42), transparent 64%);
 }
 :root[data-theme="light"] body::before { background: none; }
 
@@ -451,14 +463,15 @@ textarea { resize: vertical; min-height: 60px; }
   padding: 10px 12px; border: 1px solid var(--border);
   border-radius: var(--radius-sm); background: var(--bg-elev-2);
 }
+/* Значок файла красный, как принято у PDF, — берёт малиновый из образцов,
+   а не синий акцент интерфейса: иначе читался бы как кнопка */
 .file__icon {
   width: 34px; height: 40px; flex: none; border-radius: 5px;
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 48%, transparent);
-  color: var(--accent-strong); font-size: 9.5px; font-weight: 600;
+  background: color-mix(in srgb, var(--c2) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--c2) 48%, transparent);
+  color: var(--c2); font-size: 9.5px; font-weight: 600;
   display: grid; place-items: center; letter-spacing: .06em;
 }
-:root[data-theme="light"] .file__icon { color: var(--accent); }
 .file__body { min-width: 0; flex: 1; }
 /* Имя и приписка под ним — отдельными строками: внутри строки они
    встают в одну и слипаются */
