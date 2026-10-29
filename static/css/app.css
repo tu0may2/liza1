@@ -360,6 +360,8 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .tag--bad    { color: var(--down); border-color: color-mix(in srgb, var(--down) 50%, transparent); background: color-mix(in srgb, var(--down) 15%, transparent); }
 .tag--info   { color: var(--info); border-color: color-mix(in srgb, var(--info) 50%, transparent); background: color-mix(in srgb, var(--info) 13%, transparent); }
 .tag--draft  { border-style: dashed; }
+/* Чего ещё нет: бледный пунктир, чтобы отсутствие читалось само по себе */
+.tag--off    { border-style: dashed; opacity: .45; }
 .swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
 
 /* ------------------------------------------------------------------ */
@@ -496,3 +498,46 @@ textarea { resize: vertical; min-height: 60px; }
   .topbar__actions, .tabs, .filters, .row-actions, .drop { display: none !important; }
   body::before { display: none; }
 }
+
+/* ------------------------------------------------------------------ */
+/* Пончик и точечные шкалы                                             */
+/* ------------------------------------------------------------------ */
+.donut { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; justify-content: space-between; }
+.donut__legend { display: flex; flex-direction: column; gap: 9px; min-width: 210px; flex: 1; }
+.donut__row { display: grid; grid-template-columns: 10px 1fr auto auto; gap: 9px; align-items: center; font-size: 13px; }
+.donut__mark { width: 10px; height: 10px; border-radius: 50%; }
+.donut__name { color: var(--text-dim); }
+.donut__pct { font-family: var(--mono); font-size: 12px; color: var(--text); }
+.donut__val { font-family: var(--mono); font-size: 12px; color: var(--text-mute); }
+
+.ring__cap { fill: var(--text-mute); font-size: 11px; font-family: var(--sans); letter-spacing: .08em; }
+.ring__value--sm { font-size: 24px; }
+
+.meters { display: flex; flex-direction: column; gap: 11px; }
+.meter { display: grid; grid-template-columns: minmax(110px, 1fr) auto auto auto; gap: 12px; align-items: center; }
+.meter__name { color: var(--text-dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meter__dots { display: flex; gap: 4px; }
+.meter__dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--bg-sunken); border: 1px solid var(--border);
+}
+.meter__dot--on { border-color: transparent; }
+.meter__pct { font-family: var(--mono); font-size: 12px; color: var(--text); min-width: 46px; text-align: right; }
+.meter__val { font-family: var(--mono); font-size: 12px; color: var(--text-mute); min-width: 92px; text-align: right; }
+
+/* Полосы — пилюли с градиентом, как и кольца */
+.bar-track { border-radius: 999px; }
+.bar-fill { border-radius: 999px; }
+.prog { border-radius: 999px; }
+.prog > i { border-radius: 999px; }
+
+@media (max-width: 720px) {
+  .meter { grid-template-columns: 1fr auto; row-gap: 6px; }
+  .meter__dots { grid-column: 1 / -1; }
+}
+
+/* Кнопка со значком: снежинка переключения темы */
+.btn--icon { padding: 7px; width: 36px; display: grid; place-items: center; }
+.btn--icon svg { width: 18px; height: 18px; display: block; color: var(--text-dim); }
+.btn--icon:hover svg { color: var(--text); }
+.btn--icon-lit svg { color: var(--accent-strong); filter: drop-shadow(0 0 6px var(--glow-edge)); }

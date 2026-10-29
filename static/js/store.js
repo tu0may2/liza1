@@ -217,6 +217,9 @@ function allFileIds() {
 function removeDocument(docId) {
   const doc = db().documents.find((d2) => d2.id === docId);
   const ids = doc ? docFiles(doc).map((f) => f.id) : [];
+  /* Оплаты остаются: деньги пришли, даже если счёт убрали. Снимаем только
+     ссылку, чтобы платёж не указывал в пустоту. */
+  db().payments.forEach((p) => { if (p.docId === docId) p.docId = ''; });
   remove('documents', docId);
   return Promise.all(ids.map((id) => fileDel(id).catch(() => null)));
 }
@@ -364,21 +367,21 @@ function seedState() {
   ];
 
   s.payments = [
-    { id: 'pay-1', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: 'ord-1', date: day(-3, 14),
+    { id: 'pay-1', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: 'ord-1', docId: 'doc-3', date: day(-3, 14),
       amount: 500000, method: 'bank', note: 'Первая часть по счёту 114.' },
-    { id: 'pay-2', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: 'ord-1', date: day(-2, 11),
+    { id: 'pay-2', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: 'ord-1', docId: 'doc-3', date: day(-2, 11),
       amount: 392000, method: 'bank', note: 'Остаток по счёту 114.' },
-    { id: 'pay-3', cpId: 'cp-amur', contractId: 'k-amur-barter', orderId: 'ord-2', date: day(-2, 20),
+    { id: 'pay-3', cpId: 'cp-amur', contractId: 'k-amur-barter', orderId: 'ord-2', docId: 'doc-7', date: day(-2, 20),
       amount: 150000, method: 'cash', note: 'Доплата налом сверх взаимозачёта.' },
-    { id: 'pay-4', cpId: 'cp-amur', contractId: 'k-amur-barter', orderId: 'ord-2', date: day(-1, 8),
-      amount: 120000, method: 'cash', note: '' },
-    { id: 'pay-5', cpId: 'cp-sharks', contractId: 'k-sharks-main', orderId: 'ord-3', date: day(-1, 19),
+    { id: 'pay-4', cpId: 'cp-amur', contractId: 'k-amur-barter', orderId: 'ord-2', docId: 'doc-7', date: day(-1, 8),
+      amount: 120000, method: 'cash', note: 'Вторая часть по счёту 118Б.' },
+    { id: 'pay-5', cpId: 'cp-sharks', contractId: 'k-sharks-main', orderId: 'ord-3', docId: 'doc-10', date: day(-1, 19),
       amount: 261000, method: 'bank', note: 'Предоплата 50% по счёту 121.' },
     { id: 'pay-6', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: '', date: day(-1, 26),
       amount: 180000, method: 'bank', note: 'Аванс под заказ 124.' },
     { id: 'pay-7', cpId: 'cp-amur', contractId: 'k-amur-main', orderId: 'ord-4', date: day(0, 8),
       amount: 240000, method: 'bank', note: 'Первый транш по заказу 124.' },
-    { id: 'pay-8', cpId: 'cp-sharks', contractId: 'k-sharks-main', orderId: 'ord-3', date: day(0, 14),
+    { id: 'pay-8', cpId: 'cp-sharks', contractId: 'k-sharks-main', orderId: 'ord-3', docId: 'doc-10', date: day(0, 14),
       amount: 95000, method: 'cash', note: 'Доплата налом за срочную партию.' }
   ];
 

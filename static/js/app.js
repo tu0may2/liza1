@@ -74,6 +74,21 @@ function contractOptions(cpId, includeAll) {
   return list;
 }
 
+/* Счета контрагента для привязки оплаты. Счёт — не обязателен: деньги
+   могут прийти авансом, до выставления. */
+function invoiceOptions(cpId, orderId) {
+  const list = [['', '— без счёта —']];
+  db().documents
+    .filter((x) => x.type === 'invoice' && (!cpId || x.cpId === cpId) && (!orderId || x.orderId === orderId))
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+    .forEach((x) => {
+      const left = Number(x.amount) - paidByDoc(x.id);
+      list.push([x.id, 'Счёт №' + (x.number || '—') + ' от ' + fmtDate(x.date) +
+        ' · ' + fmtMoney(x.amount, { bare: true }) + (left > 0.5 ? ', осталось ' + fmtMoney(left, { bare: true }) : ', закрыт')]);
+    });
+  return list;
+}
+
 function orderOptions(cpId) {
   const list = [['', '— без заказа —']];
   db().orders.filter((o) => !cpId || o.cpId === cpId).forEach((o) => {
@@ -150,6 +165,38 @@ function schedStatus(s) {
 /* Оплачено по заказу — из фактических оплат, привязанных к заказу */
 function paidByOrder(orderId) {
   return sum(db().payments.filter((p) => p.orderId === orderId));
+}
+
+/* Счета по заказу. Спецификация и УПД сюда не входят: они описывают ту же
+   поставку, и сложить их со счётом значило бы посчитать заказ дважды. */
+function invoicesOfOrder(orderId) {
+  return db().documents.filter((x) => x.orderId === orderId && x.type === 'invoice' && x.status !== 'rejected');
+}
+
+function invoicedByOrder(orderId) { return sum(invoicesOfOrder(orderId)); }
+
+/* Оплаты, привязанные к конкретному счёту. Счёт может закрываться
+   несколькими платежами — заказ при этом остаётся одним. */
+function paymentsOfDoc(docId) {
+  return db().payments.filter((p) => p.docId === docId);
+}
+
+function paidByDoc(docId) { return sum(paymentsOfDoc(docId)); }
+
+/* Сводка по заказу: одна строка цепочки заказ → счета → оплаты.
+   Оплаты берутся по заказу целиком, поэтому платёж, привязанный к счёту,
+   и платёж без счёта считаются один раз и не теряются. */
+function orderChain(order) {
+  const total = orderTotal(order);
+  const invoiced = invoicedByOrder(order.id);
+  const pays = db().payments.filter((p) => p.orderId === order.id);
+  const paid = sum(pays);
+  return {
+    total: total, invoiced: invoiced, paid: paid,
+    payCount: pays.length, left: total - paid,
+    docs: docsOf({ orderId: order.id }),
+    overpaid: invoiced > 0 && paid - invoiced > 0.5
+  };
 }
 
 /* Долг контрагента: выставлено счетами минус оплачено. Договоры и
@@ -267,12 +314,24 @@ function openForm(cfg) {
 
   /* Связанные списки: при смене контрагента перестраиваем договоры и заказы */
   back.addEventListener('change', (e) => {
-    if (e.target.name !== 'cpId') return;
-    const cpId = e.target.value;
-    const kSel = back.querySelector('[name="contractId"]');
-    if (kSel) kSel.innerHTML = selectOptions(contractOptions(cpId, false), '');
-    const oSel = back.querySelector('[name="orderId"]');
-    if (oSel) oSel.innerHTML = selectOptions(orderOptions(cpId), '');
+    const form = back.querySelector('#modal-form');
+    const cpSel = form.elements.cpId;
+    const dSel = back.querySelector('[name="docId"]');
+
+    if (e.target.name === 'cpId') {
+      const cpId = e.target.value;
+      const kSel = back.querySelector('[name="contractId"]');
+      if (kSel) kSel.innerHTML = selectOptions(contractOptions(cpId, false), '');
+      const oSel = back.querySelector('[name="orderId"]');
+      if (oSel) oSel.innerHTML = selectOptions(orderOptions(cpId), '');
+      if (dSel) dSel.innerHTML = selectOptions(invoiceOptions(cpId, ''), '');
+      return;
+    }
+    /* Выбрали заказ — список счетов сужается до его счетов: именно по ним
+       и приходят деньги, а чужой счёт в этом списке только мешает */
+    if (e.target.name === 'orderId' && dSel) {
+      dSel.innerHTML = selectOptions(invoiceOptions(cpSel ? cpSel.value : '', e.target.value), '');
+    }
   });
 
   document.body.appendChild(back);
@@ -572,13 +631,13 @@ function viewDash() {
 
   const nearest = sched.slice().sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate))).slice(0, 8);
 
-  const cpRows = d.counterparties.map((c) => ({
+  /* Доля контрагента в поступлениях: цвет закреплён за ним по месту в
+     справочнике, как и точка на его вкладке */
+  const cpRows = d.counterparties.map((c, i) => ({
     label: c.name,
-    parts: Object.keys(PAY_METHODS).map((k) => ({
-      label: PAY_METHODS[k].label, color: PAY_METHODS[k].color,
-      value: sum(d.payments.filter((p) => p.cpId === c.id && p.method === k))
-    }))
-  })).sort((a, b) => b.parts.reduce((s, p) => s + p.value, 0) - a.parts.reduce((s, p) => s + p.value, 0));
+    color: 'var(--s' + ((i % 4) + 1) + ')',
+    value: sum(d.payments.filter((p) => p.cpId === c.id))
+  })).sort((a, b) => b.value - a.value);
 
   /* Три доли, которые спрашивают первыми: сколько из заказанного оплачено,
      насколько закрыт график и чем платят. */
@@ -588,19 +647,27 @@ function viewDash() {
   const schedDone = sum(d.schedule.filter((x) => x.status === 'paid'), 'amount');
   const bankAll = sum(d.payments.filter((p) => p.method === 'bank'));
   const ringItems = [
-    { value: paidAll, max: ordersAll, label: 'Оплачено от заказов',
+    { value: paidAll, max: ordersAll, label: 'Оплачено от заказов', cap: 'Доля',
       sub: fmtMoney(paidAll) + ' из ' + fmtMoney(ordersAll), color: 'var(--c1)' },
-    { value: schedDone, max: schedAll, label: 'График закрыт',
-      sub: fmtMoney(schedAll - schedDone) + ' осталось', color: 'var(--accent)' },
-    /* Безнал всюду зелёный, нал малиновый — кольцо держит тот же цвет,
-       что столбцы и метки, иначе читалось бы как другая величина */
-    { value: bankAll, max: paidAll, label: 'Доля безнала',
-      sub: fmtMoney(paidAll - bankAll) + ' налом', color: 'var(--c1)' }
+    { value: schedDone, max: schedAll, label: 'График закрыт', cap: 'Доля',
+      sub: fmtMoney(schedAll - schedDone) + ' осталось', color: 'var(--accent)' }
   ];
+  /* Безнал всюду зелёный, нал малиновый — пончик держит те же цвета, что
+     столбцы и метки, иначе читался бы как другая величина */
+  const methodDonut = Object.keys(PAY_METHODS).map((k) => ({
+    label: PAY_METHODS[k].label, color: PAY_METHODS[k].color,
+    value: sum(d.payments.filter((p) => p.method === k))
+  }));
 
   return '<div class="kpi-grid">' + kpis + '</div>' +
-    card('Как идут расчёты', chartSlot('ch-dash-rings', (host) => ringGauge(host, ringItems)),
-      { note: 'Точные суммы — под каждым кольцом и в таблицах разделов.' }) +
+    '<div class="grid2">' +
+      card('Как идут расчёты', chartSlot('ch-dash-rings', (host) => ringGauge(host, ringItems)),
+        { note: 'Точные суммы — под каждым кольцом и в таблицах разделов.' }) +
+      card('Нал и безнал',
+        chartSlot('ch-dash-donut', (host) => donutChart(host, methodDonut,
+          { cap: 'Поступило', center: fmtShort(paidAll) })),
+        { note: 'За всё время. Помесячно — на графике ниже.' }) +
+    '</div>' +
     card('Оплаты по месяцам — нал и безнал',
       chartSlot('ch-dash-pay', (host) => stackedBars(host, { labels: payMonths, series: seriesMethod }),
         seriesTable(payMonths, seriesMethod)),
@@ -609,8 +676,8 @@ function viewDash() {
       card('Ближайшие платежи по графику', nearest.length ? schedTable(nearest, { compact: true }) :
         '<p class="empty">График пуст — добавьте плановые платежи во вкладке «Оплаты»</p>',
         { flush: nearest.length > 0, tools: '<button class="btn btn--sm" data-act="go-payments" type="button">Весь график</button>' }) +
-      card('Поступления по контрагентам', chartSlot('ch-dash-cp', (host) => hBars(host, cpRows)),
-        { note: 'За всё время, с разбивкой по способу оплаты.' }) +
+      card('Доля в поступлениях', chartSlot('ch-dash-cp', (host) => dotMeters(host, cpRows)),
+        { note: 'За всё время. Точки — доля контрагента в общей сумме поступлений.' }) +
     '</div>';
 }
 
@@ -645,6 +712,13 @@ function schedTable(rows, opts) {
     '</tr></tfoot></table></div>';
 }
 
+/* Ссылка на счёт в строке оплаты */
+function docLabel(docId) {
+  if (!docId) return '<span class="hint">—</span>';
+  const d = db().documents.find((x) => x.id === docId);
+  return d ? esc('№' + (d.number || '—')) : '<span class="hint">удалён</span>';
+}
+
 /* ------------------------------------------------------------------ */
 /* Таблица фактических оплат                                          */
 /* ------------------------------------------------------------------ */
@@ -652,7 +726,7 @@ function payTable(rows, opts) {
   const o = opts || {};
   if (!rows.length) return '<p class="empty">Оплат по этому фильтру нет</p>';
   return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
-    '<th>Дата</th>' + (o.hideCp ? '' : '<th>Контрагент</th>') + '<th>Договор</th><th>Заказ</th>' +
+    '<th>Дата</th>' + (o.hideCp ? '' : '<th>Контрагент</th>') + '<th>Договор</th><th>Заказ</th><th>Счёт</th>' +
     '<th>Способ</th><th class="num">Сумма</th><th>Комментарий</th><th></th>' +
     '</tr></thead><tbody>' +
     rows.map((p) => '<tr>' +
@@ -660,14 +734,31 @@ function payTable(rows, opts) {
       (o.hideCp ? '' : '<td class="nowrap">' + esc(cpName(p.cpId)) + '</td>') +
       '<td>' + contractTag(p.cpId, p.contractId) + '</td>' +
       '<td class="nowrap">' + (p.orderId ? esc(orderLabel(p.orderId)) : '<span class="hint">—</span>') + '</td>' +
+      '<td class="nowrap">' + docLabel(p.docId) + '</td>' +
       '<td>' + methodTag(p.method) + '</td>' +
       '<td class="num">' + fmtMoney(p.amount) + '</td>' +
       '<td>' + esc(p.note || '') + '</td>' +
       '<td><button class="btn btn--sm" data-act="pay-edit" data-id="' + esc(p.id) + '" type="button">Правка</button></td>' +
       '</tr>').join('') +
-    '</tbody><tfoot><tr><td colspan="' + (o.hideCp ? 4 : 5) + '">Итого ' + rows.length + ' ' +
+    '</tbody><tfoot><tr><td colspan="' + (o.hideCp ? 5 : 6) + '">Итого ' + rows.length + ' ' +
     plural(rows.length, 'оплата', 'оплаты', 'оплат') + '</td>' +
     '<td class="num">' + fmtMoney(sum(rows, 'amount')) + '</td><td colspan="2"></td></tr></tfoot></table></div>';
+}
+
+/* Под суммой счёта — сколько по нему уже пришло. Счёт закрывается
+   частями, и в строке должно быть видно, сколько осталось. */
+function invoicePaidHTML(doc) {
+  if (doc.type !== 'invoice' || !Number(doc.amount)) return '';
+  const paid = paidByDoc(doc.id);
+  if (!paid) return '<div class="hint" style="font-family:var(--sans)">не оплачен</div>';
+  const left = Number(doc.amount) - paid;
+  const n = paymentsOfDoc(doc.id).length;
+  return '<div class="hint" style="font-family:var(--sans)">' +
+    (left > 0.5
+      ? 'оплачено ' + fmtMoney(paid) + ', осталось ' + fmtMoney(left)
+      : 'оплачен полностью') +
+    (n > 1 ? ' · ' + n + ' ' + plural(n, 'платёж', 'платежа', 'платежей') : '') +
+    '</div>';
 }
 
 /* ------------------------------------------------------------------ */
@@ -701,7 +792,8 @@ function docTable(rows, opts) {
       (o.hideCp ? '' : '<td class="nowrap">' + esc(cpName(x.cpId)) + '</td>') +
       '<td>' + contractTag(x.cpId, x.contractId) + '</td>' +
       '<td class="nowrap">' + (x.orderId ? esc(orderLabel(x.orderId)) : '<span class="hint">—</span>') + '</td>' +
-      '<td class="num">' + (Number(x.amount) ? fmtMoney(x.amount) : '<span class="hint">—</span>') + '</td>' +
+      '<td class="num">' + (Number(x.amount) ? fmtMoney(x.amount) : '<span class="hint">—</span>') +
+        invoicePaidHTML(x) + '</td>' +
       '<td>' + docTag(x.status) + '</td>' +
       '<td class="nowrap">' + clipHTML(x) + '</td>' +
       '<td>' + esc(x.note || '') + '</td>' +
@@ -710,9 +802,12 @@ function docTable(rows, opts) {
         '<button class="btn btn--sm" data-act="doc-edit" data-id="' + esc(x.id) + '" type="button">Правка</button>' +
       '</div></td>' +
       '</tr>').join('') +
+    /* В итог идут только счета. Спецификация, УПД и акт описывают ту же
+       поставку, и сумма всех документов подряд завысила бы заказ в разы. */
     '</tbody><tfoot><tr><td colspan="' + (o.hideCp ? 5 : 6) + '">Итого ' + rows.length + ' ' +
-    plural(rows.length, 'документ', 'документа', 'документов') + '</td>' +
-    '<td class="num">' + fmtMoney(sum(rows, 'amount')) + '</td><td colspan="4"></td></tr></tfoot></table></div>';
+    plural(rows.length, 'документ', 'документа', 'документов') + ', из них счетов на</td>' +
+    '<td class="num">' + fmtMoney(sum(rows.filter((x) => x.type === 'invoice' && x.status !== 'rejected'), 'amount')) +
+    '</td><td colspan="4"></td></tr></tfoot></table></div>';
 }
 
 /* ------------------------------------------------------------------ */
@@ -723,7 +818,8 @@ function orderTable(rows, opts) {
   if (!rows.length) return '<p class="empty">Заказов по этому фильтру нет</p>';
   return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
     '<th>Дата</th><th>Номер</th>' + (o.hideCp ? '' : '<th>Контрагент</th>') + '<th>Договор</th>' +
-    '<th>Статус</th><th class="num">Позиций</th><th class="num">Сумма</th><th class="num">Оплачено</th>' +
+    '<th>Статус</th><th class="num">Позиций</th><th class="num">Сумма</th>' +
+    '<th class="num">Выставлено</th><th class="num">Оплачено</th>' +
     '<th>Готовность оплаты</th><th></th></tr></thead><tbody>' +
     rows.map((x) => {
       const total = orderTotal(x);
@@ -737,6 +833,7 @@ function orderTable(rows, opts) {
         '<td>' + orderTag(x.status) + '</td>' +
         '<td class="num">' + x.items.length + '</td>' +
         '<td class="num">' + fmtMoney(total) + '</td>' +
+        '<td class="num">' + (invoicedByOrder(x.id) ? fmtMoney(invoicedByOrder(x.id)) : '<span class="hint">—</span>') + '</td>' +
         '<td class="num">' + fmtMoney(paid) + '</td>' +
         '<td><div class="prog' + (paid > total && total ? ' prog--over' : '') + '" title="' + fmtPct(pct) + '">' +
           '<i style="width:' + pct + '%"></i></div></td>' +
@@ -746,6 +843,7 @@ function orderTable(rows, opts) {
     '</tbody><tfoot><tr><td colspan="' + (o.hideCp ? 5 : 6) + '">Итого ' + rows.length + ' ' +
     plural(rows.length, 'заказ', 'заказа', 'заказов') + '</td>' +
     '<td class="num">' + fmtMoney(rows.reduce((s, x) => s + orderTotal(x), 0)) + '</td>' +
+    '<td class="num">' + fmtMoney(rows.reduce((s, x) => s + invoicedByOrder(x.id), 0)) + '</td>' +
     '<td class="num">' + fmtMoney(rows.reduce((s, x) => s + paidByOrder(x.id), 0)) + '</td>' +
     '<td colspan="2"></td></tr></tfoot></table></div>';
 }
@@ -1107,13 +1205,20 @@ function viewOrderEdit() {
 /* Плитки заказа считаются от текущих позиций, поэтому вынесены отдельно:
    их же разметка подставляется при живой правке строк. */
 function orderKpisHTML(o) {
-  const total = orderTotal(o);
-  const paid = paidByOrder(o.id);
-  const pct = total ? Math.min(100, paid / total * 100) : 0;
-  return kpi('Сумма заказа', fmtMoney(total), o.items.length + ' ' + plural(o.items.length, 'позиция', 'позиции', 'позиций')) +
-    kpi('Оплачено', fmtMoney(paid), total ? fmtPct(pct) + ' от суммы' : '', 'kpi--up') +
-    kpi('Остаток', fmtMoney(Math.max(0, total - paid)), total - paid > 0 ? 'ждём оплату' : 'закрыт',
-        total - paid > 0 ? 'kpi--warn' : '') +
+  const ch = orderChain(o);
+  const pct = ch.total ? Math.min(100, ch.paid / ch.total * 100) : 0;
+  const invCount = invoicesOfOrder(o.id).length;
+  return kpi('Сумма заказа', fmtMoney(ch.total),
+        o.items.length + ' ' + plural(o.items.length, 'позиция', 'позиции', 'позиций')) +
+    kpi('Выставлено счетами', fmtMoney(ch.invoiced),
+        invCount ? invCount + ' ' + plural(invCount, 'счёт', 'счёта', 'счетов') : 'счёт ещё не выписан',
+        !invCount && ch.total ? 'kpi--warn' : '') +
+    kpi('Оплачено', fmtMoney(ch.paid),
+        (ch.total ? fmtPct(pct) + ' от заказа' : '') +
+        (ch.payCount > 1 ? ' · ' + ch.payCount + ' ' + plural(ch.payCount, 'платёж', 'платежа', 'платежей') : ''),
+        'kpi--up') +
+    kpi('Остаток', fmtMoney(Math.max(0, ch.left)), ch.left > 0.5 ? 'ждём оплату' : 'закрыт',
+        ch.left > 0.5 ? 'kpi--warn' : '') +
     kpi('Статус', ORDER_STATUSES[o.status] ? esc(ORDER_STATUSES[o.status].label) : '—',
         o.shipDate ? 'отгрузка ' + fmtDate(o.shipDate) : 'дата отгрузки не задана');
 }
@@ -1339,6 +1444,50 @@ function viewAnalytics() {
       '<td class="num">' + fmtMoney(cpTotals.reduce((s, r) => s + r.b.debt, 0)) + '</td>' +
     '</tr></tfoot></table></div>';
 
+  /* Цепочка по заказам. Каждый заказ — ровно одна строка, сколько бы
+     счетов и оплат к нему ни относилось: сумма заказа берётся из его
+     позиций, выставленное — только из счетов, оплаченное — из платежей
+     по этому заказу. Поэтому частичные оплаты и несколько документов не
+     раздувают итог. */
+  const chainRows = orders.map((o) => ({ o: o, ch: orderChain(o) }));
+  const chainTable = chainRows.length
+    ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+      '<th>Заказ</th><th>Контрагент</th><th>Договор</th><th>Статус</th>' +
+      '<th class="num">Сумма заказа</th><th class="num">Выставлено</th>' +
+      '<th class="num">Оплачено</th><th class="num">Остаток</th><th>Документы</th></tr></thead><tbody>' +
+      chainRows.map((r) => {
+        const have = {};
+        r.ch.docs.forEach((x) => { have[x.type] = true; });
+        /* Чего ещё нет — бледным пунктиром: видно одним взглядом, какой
+           документ по заказу не выпущен */
+        const chips = ['invoice', 'spec', 'upd'].map((t) =>
+          '<span class="tag ' + (have[t] ? 'tag--ok' : 'tag--off') + '" title="' +
+          (have[t] ? 'есть' : 'не выпущен') + '">' +
+          esc(DOC_TYPES[t].replace(' / накладная', '')) + '</span>').join(' ');
+        return '<tr>' +
+          '<td class="nowrap"><button class="btn btn--sm btn--ghost" data-act="order-open" data-id="' + esc(r.o.id) +
+            '" type="button">' + esc(r.o.number || r.o.id.slice(-4)) + '</button></td>' +
+          '<td class="nowrap">' + esc(cpName(r.o.cpId)) + '</td>' +
+          '<td>' + contractTag(r.o.cpId, r.o.contractId) + '</td>' +
+          '<td>' + orderTag(r.o.status) + '</td>' +
+          '<td class="num">' + fmtMoney(r.ch.total) + '</td>' +
+          '<td class="num">' + (r.ch.invoiced ? fmtMoney(r.ch.invoiced) : '<span class="hint">—</span>') + '</td>' +
+          '<td class="num">' + fmtMoney(r.ch.paid) +
+            (r.ch.payCount > 1 ? '<div class="hint" style="font-family:var(--sans)">' + r.ch.payCount + ' ' +
+              plural(r.ch.payCount, 'платёж', 'платежа', 'платежей') + '</div>' : '') + '</td>' +
+          '<td class="num">' + (r.ch.left > 0.5 ? fmtMoney(r.ch.left) : '<span class="hint">закрыт</span>') + '</td>' +
+          '<td class="nowrap">' + chips + (r.ch.overpaid ? ' ' + tag('оплачено больше счёта', 'tag--warn') : '') + '</td>' +
+        '</tr>';
+      }).join('') +
+      '</tbody><tfoot><tr><td colspan="4">Итого ' + chainRows.length + ' ' +
+        plural(chainRows.length, 'заказ', 'заказа', 'заказов') + '</td>' +
+        '<td class="num">' + fmtMoney(chainRows.reduce((a, r) => a + r.ch.total, 0)) + '</td>' +
+        '<td class="num">' + fmtMoney(chainRows.reduce((a, r) => a + r.ch.invoiced, 0)) + '</td>' +
+        '<td class="num">' + fmtMoney(chainRows.reduce((a, r) => a + r.ch.paid, 0)) + '</td>' +
+        '<td class="num">' + fmtMoney(chainRows.reduce((a, r) => a + Math.max(0, r.ch.left), 0)) + '</td>' +
+        '<td></td></tr></tfoot></table></div>'
+    : '<p class="empty">Заказов по этому фильтру нет</p>';
+
   return filtersHTML({ cp: true, contract: true, period: true }) +
     '<div class="kpi-grid">' +
       kpi('Сумма заказов', fmtMoney(ordersTotal), orders.length + ' ' + plural(orders.length, 'заказ', 'заказа', 'заказов')) +
@@ -1348,6 +1497,10 @@ function viewAnalytics() {
       kpi('Контрагентов', String(d.counterparties.length),
           allContracts().length + ' ' + plural(allContracts().length, 'договор', 'договора', 'договоров')) +
     '</div>' +
+    card('Заказ → счета → оплаты', chainTable, { flush: true,
+      note: 'Одна строка на заказ, сколько бы к нему ни было счетов, спецификаций и платежей. ' +
+        'Сумма заказа считается по его позициям, выставленное — только по счетам, ' +
+        'оплаченное — по платежам этого заказа. Частичная оплата не делит заказ и не задваивает суммы.' }) +
     card('Итоги по контрагентам', totalsTable, { flush: true,
       note: 'Нажмите на название, чтобы открыть вкладку контрагента.' }) +
     card('Поступления по месяцам и контрагентам',
@@ -1510,6 +1663,10 @@ function formPayment(payId, preset) {
         value: p ? p.contractId : (preset && preset.contractId) || '', options: contractOptions(cpId, false) },
       { name: 'orderId', label: 'Заказ', type: 'select',
         value: p ? p.orderId : (preset && preset.orderId) || '', options: orderOptions(cpId) },
+      { name: 'docId', label: 'Счёт', type: 'select',
+        value: p ? p.docId : (preset && preset.docId) || '',
+        options: invoiceOptions(cpId, (p ? p.orderId : (preset && preset.orderId)) || ''),
+        hint: 'Один счёт можно закрыть несколькими оплатами' },
       { name: 'method', label: 'Способ', type: 'select', value: p ? p.method : (preset && preset.method) || 'bank',
         options: Object.keys(PAY_METHODS).map((k) => [k, PAY_METHODS[k].label]) },
       { name: 'note', label: 'Комментарий', type: 'textarea', value: p && p.note, wide: true }
@@ -1746,8 +1903,14 @@ function handleAction(act, node) {
     case 'order-make-pay': {
       const o = orderById(route.orderId);
       if (!o) return;
-      const left = Math.max(0, orderTotal(o) - paidByOrder(o.id));
-      formPayment('', { cpId: o.cpId, contractId: o.contractId, orderId: o.id, amount: left || orderTotal(o) });
+      /* Подставляем первый незакрытый счёт заказа и остаток по нему:
+         чаще всего деньги приходят именно по нему, частями */
+      const openInv = invoicesOfOrder(o.id).find((x) => Number(x.amount) - paidByDoc(x.id) > 0.5);
+      const left = openInv
+        ? Number(openInv.amount) - paidByDoc(openInv.id)
+        : Math.max(0, orderTotal(o) - paidByOrder(o.id));
+      formPayment('', { cpId: o.cpId, contractId: o.contractId, orderId: o.id,
+                        docId: openInv ? openInv.id : '', amount: left || orderTotal(o) });
       return;
     }
 
@@ -1851,13 +2014,36 @@ function logoFor(theme) {
     : wingsSVG('d', '#7fd9ff', '#1b6fe0', true);
 }
 
+/* Снежинка на кнопке темы. Рисуется, а не берётся эмодзи: эмодзи у каждой
+   системы своё, цветное и к палитре не приводится. Шесть лучей с ветками —
+   по кругу поворотом одного и того же луча. */
+function snowflakeSVG() {
+  let arms = '';
+  for (let i = 0; i < 6; i++) {
+    arms += '<g transform="rotate(' + (i * 60) + ' 12 12)">' +
+      '<path d="M12 12V2.6"/>' +
+      '<path d="M12 5.6 9.4 3M12 5.6 14.6 3"/>' +
+      '<path d="M12 9.2 10.1 7.3M12 9.2 13.9 7.3"/>' +
+    '</g>';
+  }
+  return '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.6" stroke-linecap="round">' + arms + '</svg>';
+}
+
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   try { localStorage.setItem('sales-platform-theme', theme); } catch (e) { /* не критично */ }
   const btn = document.getElementById('btn-theme');
   if (btn) {
-    btn.textContent = theme === 'light' ? '🌙' : '☀';
-    btn.title = theme === 'light' ? 'Тёмная тема' : 'Светлая тема';
+    /* Значок один и тот же, меняется только его вид: на тёмной теме
+       снежинка горит акцентом, на светлой лежит приглушённым контуром.
+       Что именно произойдёт по нажатию, сказано в подсказке и для
+       экранного диктора. */
+    btn.innerHTML = snowflakeSVG();
+    btn.classList.toggle('btn--icon-lit', theme !== 'light');
+    const action = theme === 'light' ? 'Включить тёмную тему' : 'Включить светлую тему';
+    btn.title = action;
+    btn.setAttribute('aria-label', action);
   }
 
   /* Вкладка браузера и шапка берут один и тот же контур. */
