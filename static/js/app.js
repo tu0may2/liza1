@@ -1528,6 +1528,50 @@ function handleAction(act, node) {
 /* ------------------------------------------------------------------ */
 /* Запуск                                                             */
 /* ------------------------------------------------------------------ */
+/* Мордочка тигра — знак платформы. Рисуется прямо в разметке, а не берётся
+   картинкой: один и тот же контур идёт и в значок вкладки, и в шапку, а на
+   16 пикселях остаётся узнаваемым, потому что всё держится на крупных
+   пятнах — ушах, полосах лба и светлой морде. */
+function tigerSVG(fur, stripe, muzzle, ink, warm) {
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">' +
+    /* уши */
+    '<circle cx="13" cy="17" r="9.5" fill="' + fur + '"/>' +
+    '<circle cx="51" cy="17" r="9.5" fill="' + fur + '"/>' +
+    '<circle cx="13" cy="18" r="4.6" fill="' + warm + '"/>' +
+    '<circle cx="51" cy="18" r="4.6" fill="' + warm + '"/>' +
+    /* голова с бакенбардами по бокам */
+    '<path d="M32 11 C46 11 57 19 57 32 L61.5 36 L54.5 40 L60 45.5 L51.5 48.5 ' +
+      'C49 55.5 41 60.5 32 60.5 C23 60.5 15 55.5 12.5 48.5 L4 45.5 L9.5 40 L2.5 36 L7 32 ' +
+      'C7 19 18 11 32 11 Z" fill="' + fur + '"/>' +
+    /* полосы лба */
+    '<path d="M32 13 L32 22" stroke="' + stripe + '" stroke-width="3.8" stroke-linecap="round"/>' +
+    '<path d="M26 15 L25 27" stroke="' + stripe + '" stroke-width="4.2" stroke-linecap="round"/>' +
+    '<path d="M38 15 L39 27" stroke="' + stripe + '" stroke-width="4.2" stroke-linecap="round"/>' +
+    '<path d="M18 20 L20 30" stroke="' + stripe + '" stroke-width="3.8" stroke-linecap="round"/>' +
+    '<path d="M46 20 L44 30" stroke="' + stripe + '" stroke-width="3.8" stroke-linecap="round"/>' +
+    /* полосы щёк */
+    '<path d="M7 36 L18 37.5" stroke="' + stripe + '" stroke-width="3.8" stroke-linecap="round"/>' +
+    '<path d="M9 44.5 L19 43.5" stroke="' + stripe + '" stroke-width="3.6" stroke-linecap="round"/>' +
+    '<path d="M57 36 L46 37.5" stroke="' + stripe + '" stroke-width="3.8" stroke-linecap="round"/>' +
+    '<path d="M55 44.5 L45 43.5" stroke="' + stripe + '" stroke-width="3.6" stroke-linecap="round"/>' +
+    /* морда, глаза, нос */
+    '<ellipse cx="26.5" cy="48" rx="7" ry="5.8" fill="' + muzzle + '"/>' +
+    '<ellipse cx="37.5" cy="48" rx="7" ry="5.8" fill="' + muzzle + '"/>' +
+    '<circle cx="23.5" cy="34.5" r="4.2" fill="' + ink + '"/>' +
+    '<circle cx="40.5" cy="34.5" r="4.2" fill="' + ink + '"/>' +
+    '<path d="M27.5 42.5 Q32 39.5 36.5 42.5 Q32 47.5 27.5 42.5 Z" fill="' + warm + '"/>' +
+    '<path d="M32 46 L32 48.5" stroke="' + ink + '" stroke-width="2.2" stroke-linecap="round"/>' +
+    '</svg>';
+}
+
+/* Светлая мордочка — для тёмной темы, тёмная — для светлой: знак всегда
+   контрастен тому, на чём лежит. Оранжевый нос и уши одинаковы в обеих. */
+function tigerFor(theme) {
+  return theme === 'light'
+    ? tigerSVG('#18233a', '#eaf0f9', '#44567f', '#eaf0f9', '#e07a55')   /* тёмная мордочка */
+    : tigerSVG('#edd2a3', '#22304b', '#fffdf8', '#22304b', '#dd6f46');  /* светлая мордочка */
+}
+
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   try { localStorage.setItem('sales-platform-theme', theme); } catch (e) { /* не критично */ }
@@ -1536,6 +1580,14 @@ function applyTheme(theme) {
     btn.textContent = theme === 'light' ? '🌙' : '☀';
     btn.title = theme === 'light' ? 'Тёмная тема' : 'Светлая тема';
   }
+
+  /* Для светлой темы знак рисуется тёмной мордочкой, и наоборот: вкладка
+     браузера и шапка берут один и тот же контур. */
+  const svg = tigerFor(theme);
+  const logo = document.getElementById('logo');
+  if (logo) logo.innerHTML = svg;
+  const icon = document.getElementById('favicon');
+  if (icon) icon.setAttribute('href', 'data:image/svg+xml,' + encodeURIComponent(svg));
 }
 
 function init() {

@@ -119,13 +119,14 @@ a { color: var(--accent-strong); }
   flex-wrap: wrap;
 }
 .topbar__brand { display: flex; align-items: center; gap: 11px; }
+/* Знак платформы — мордочка тигра. Подложки нет: у рисунка собственный
+   силуэт, и на любой из двух тем он контрастен сам по себе. */
 .topbar__logo {
-  width: 36px; height: 36px;
+  width: 38px; height: 38px;
   display: grid; place-items: center;
-  background: linear-gradient(150deg, var(--accent-strong), var(--accent));
-  border-radius: var(--radius);
-  font-size: 18px; color: var(--accent-contrast); font-weight: 700;
+  flex: none;
 }
+.topbar__logo svg { width: 100%; height: 100%; display: block; }
 .topbar__subtitle { margin: 1px 0 0; font-size: 11.5px; color: var(--text-mute); }
 .topbar__actions { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 

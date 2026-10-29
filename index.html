@@ -6,12 +6,14 @@
   <title>Платформа продаж</title>
   <meta name="description" content="Учёт контрагентов, заказов, документов и оплат: история по каждому контрагенту, график платежей, аналитика.">
   <link rel="stylesheet" href="static/css/app.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📘</text></svg>">
+  <!-- Значок подставляется скриптом под текущую тему; здесь запасной вариант
+       на случай, если тема ещё не применилась. -->
+  <link rel="icon" id="favicon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='13' cy='17' r='9.5' fill='%23edd2a3'/><circle cx='51' cy='17' r='9.5' fill='%23edd2a3'/><circle cx='32' cy='36' r='25' fill='%23edd2a3'/></svg>">
 </head>
 <body>
   <header class="topbar">
     <div class="topbar__brand">
-      <span class="topbar__logo">₽</span>
+      <span class="topbar__logo" id="logo" aria-hidden="true"></span>
       <div>
         <h1>Платформа продаж</h1>
         <p class="topbar__subtitle">Контрагенты · документы · оплаты · аналитика</p>
