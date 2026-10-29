@@ -10,7 +10,7 @@ const SCHEMA = 1;
 const CONTRACT_KINDS = {
   main:   { label: 'Основной', tag: 'tag--main',   color: 'var(--c1)' },
   barter: { label: 'Бартерный', tag: 'tag--barter', color: 'var(--c2)' },
-  other:  { label: 'Прочий',   tag: '',            color: 'var(--c3)' }
+  other:  { label: 'Прочий',   tag: '',            color: 'var(--s3)' }
 };
 
 const PAY_METHODS = {

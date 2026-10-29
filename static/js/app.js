@@ -460,7 +460,10 @@ function navHTML() {
     esc(it[1]) + '</button>').join('');
 
   const cpTabs = cps.map((c, i) => {
-    const color = 'var(--c' + ((i % 4) + 1) + ')';
+    /* Контрагентов может быть сколько угодно, поэтому точка берёт ступень
+       светлоты по месту в справочнике, а не отдельный тон: четыре разных
+       тона из зелени и красного смешались бы при дальтонизме. */
+    const color = 'var(--s' + ((i % 4) + 1) + ')';
     const active = route.view === 'cp' && route.cpId === c.id;
     return '<button class="tab' + (active ? ' tab--active' : '') + '" data-nav="cp" data-cp="' + esc(c.id) + '" type="button">' +
       '<i class="tab__dot" style="background:' + color + '"></i>' + esc(c.name) + '</button>';
@@ -588,9 +591,11 @@ function viewDash() {
     { value: paidAll, max: ordersAll, label: 'Оплачено от заказов',
       sub: fmtMoney(paidAll) + ' из ' + fmtMoney(ordersAll), color: 'var(--c1)' },
     { value: schedDone, max: schedAll, label: 'График закрыт',
-      sub: fmtMoney(schedAll - schedDone) + ' осталось', color: 'var(--glow)' },
+      sub: fmtMoney(schedAll - schedDone) + ' осталось', color: 'var(--accent)' },
+    /* Безнал всюду зелёный, нал малиновый — кольцо держит тот же цвет,
+       что столбцы и метки, иначе читалось бы как другая величина */
     { value: bankAll, max: paidAll, label: 'Доля безнала',
-      sub: fmtMoney(paidAll - bankAll) + ' налом', color: 'var(--c2)' }
+      sub: fmtMoney(paidAll - bankAll) + ' налом', color: 'var(--c1)' }
   ];
 
   return '<div class="kpi-grid">' + kpis + '</div>' +
@@ -825,7 +830,7 @@ function cpSummary(c) {
     values: byMonth(db().payments.filter((p) => p.cpId === c.id && p.contractId === k.id), 'date', months)
   }));
   const noContract = byMonth(db().payments.filter((p) => p.cpId === c.id && !p.contractId), 'date', months);
-  if (noContract.some((v) => v)) byContract.push({ label: 'Без договора', color: 'var(--c4)', values: noContract });
+  if (noContract.some((v) => v)) byContract.push({ label: 'Без договора', color: 'var(--s4)', values: noContract });
 
   const docs = docsOf({ cpId: c.id }).slice(0, 6);
 
@@ -836,10 +841,10 @@ function cpSummary(c) {
     { value: bal.paid, max: bal.invoiced, label: 'Оплачено от выставленного',
       sub: fmtMoney(bal.paid) + ' из ' + fmtMoney(bal.invoiced), color: 'var(--c1)' },
     { value: bankSum, max: bal.paid, label: 'Доля безнала',
-      sub: fmtMoney(bal.paid - bankSum) + ' налом', color: 'var(--c2)' },
+      sub: fmtMoney(bal.paid - bankSum) + ' налом', color: 'var(--c1)' },
     { value: closed, max: orders.length, label: 'Заказы закрыты',
       center: closed + ' / ' + orders.length,
-      sub: fmtMoney(ordersSum) + ' всего', color: 'var(--glow)' }
+      sub: fmtMoney(ordersSum) + ' всего', color: 'var(--accent)' }
   ];
 
   return '<div class="kpi-grid">' + kpis + '</div>' +
@@ -870,7 +875,7 @@ function cpDocs(c) {
                                     from: filters.from, to: filters.to }));
   const byType = Object.keys(DOC_TYPES).map((t, i) => ({
     label: DOC_TYPES[t],
-    parts: [{ label: DOC_TYPES[t], color: 'var(--c' + ((i % 4) + 1) + ')',
+    parts: [{ label: DOC_TYPES[t], color: 'var(--s' + ((i % 4) + 1) + ')',
       value: sum(docsOf({ cpId: c.id, type: t })) }]
   })).filter((r) => r.parts[0].value > 0);
 
@@ -1015,7 +1020,7 @@ function viewOrders() {
   const byStatus = Object.keys(ORDER_STATUSES).map((k, i) => {
     const list = db().orders.filter((o) => o.status === k);
     return { label: ORDER_STATUSES[k].label,
-      parts: [{ label: ORDER_STATUSES[k].label, color: 'var(--c' + ((i % 4) + 1) + ')',
+      parts: [{ label: ORDER_STATUSES[k].label, color: 'var(--s' + ((i % 4) + 1) + ')',
         value: list.reduce((s, o) => s + orderTotal(o), 0) }] };
   }).filter((r) => r.parts[0].value > 0);
 
@@ -1155,12 +1160,12 @@ function viewPayments() {
     label: (filters.cpId ? '' : x.cp.name + ' · ') + x.contract.name,
     color: filters.cpId
       ? (CONTRACT_KINDS[x.contract.kind] || CONTRACT_KINDS.other).color
-      : 'var(--c' + ((i % 4) + 1) + ')',
+      : 'var(--s' + ((i % 4) + 1) + ')',
     values: byMonth(db().payments.filter((p) => p.contractId === x.contract.id), 'date', months)
   })).filter((s) => s.values.some((v) => v));
   const noContract = byMonth(db().payments.filter((p) => !p.contractId &&
     (!filters.cpId || p.cpId === filters.cpId)), 'date', months);
-  if (noContract.some((v) => v)) byContract.push({ label: 'Без договора', color: 'var(--c4)', values: noContract });
+  if (noContract.some((v) => v)) byContract.push({ label: 'Без договора', color: 'var(--s4)', values: noContract });
 
   /* План против факта: одна шкала, обе серии в рублях */
   const planVsFact = [
@@ -1275,7 +1280,7 @@ function viewAnalytics() {
   /* Оплаты по контрагентам: цвет закреплён за контрагентом по его месту
      в справочнике, а не по текущей сортировке */
   const cpSeries = d.counterparties.map((c, i) => ({
-    label: c.name, color: 'var(--c' + ((i % 4) + 1) + ')',
+    label: c.name, color: 'var(--s' + ((i % 4) + 1) + ')',
     values: byMonth(d.payments.filter((p) => p.cpId === c.id), 'date', months)
   })).filter((s) => s.values.some((v) => v));
 
@@ -1365,7 +1370,7 @@ function viewCps() {
     const b = balanceOf(c.id);
     const ords = db().orders.filter((o) => o.cpId === c.id);
     return '<tr>' +
-      '<td class="nowrap"><i class="tab__dot" style="background:var(--c' + ((i % 4) + 1) + ')"></i><b>' + esc(c.name) + '</b></td>' +
+      '<td class="nowrap"><i class="tab__dot" style="background:var(--s' + ((i % 4) + 1) + ')"></i><b>' + esc(c.name) + '</b></td>' +
       '<td>' + esc(c.fullName || '') + '</td>' +
       '<td class="nowrap">' + esc(c.inn || '—') + '</td>' +
       '<td>' + (c.contracts.length ? c.contracts.map((k) => contractTag(c.id, k.id)).join(' ') : '<span class="hint">нет</span>') + '</td>' +
@@ -1838,12 +1843,13 @@ function wingsSVG(key, top, bottom, glow) {
     '</g></svg>';
 }
 
-/* На тёмной теме крылья светятся холодной синью, на светлой — плотный
-   тёмно-синий без свечения: на белом ореол читается грязью. */
+/* На тёмной теме крылья горят малиновым — красное на тёмной листве, как в
+   образцах. На светлой это плотная глубокая зелень без ореола: на светлом
+   фоне свечение читается грязью. */
 function logoFor(theme) {
   return theme === 'light'
-    ? wingsSVG('l', '#34506d', '#0a1b2e', false)
-    : wingsSVG('d', '#7fd9ff', '#1b6fe0', true);
+    ? wingsSVG('l', '#235347', '#051f20', false)
+    : wingsSVG('d', '#ff8fa3', '#c50337', true);
 }
 
 function applyTheme(theme) {
