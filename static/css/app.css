@@ -541,3 +541,36 @@ textarea { resize: vertical; min-height: 60px; }
 .btn--icon svg { width: 18px; height: 18px; display: block; color: var(--text-dim); }
 .btn--icon:hover svg { color: var(--text); }
 .btn--icon-lit svg { color: var(--accent-strong); filter: drop-shadow(0 0 6px var(--glow-edge)); }
+
+/* ------------------------------------------------------------------ */
+/* Котик                                                               */
+/* ------------------------------------------------------------------ */
+/* Выглядывает оттуда, где пусто. Цвет берёт от текста и приглушён —
+   он украшает место, а не спорит с данными рядом. */
+.empty { padding: 22px 16px 24px; }
+.empty__cat {
+  display: block; width: 74px; margin: 0 auto 12px;
+  color: var(--text-mute); opacity: .5;
+}
+.empty__cat svg { width: 100%; height: auto; display: block; }
+
+.drop__cat {
+  display: block; width: 62px; margin: 0 auto 10px;
+  color: var(--text-mute); opacity: .55; transition: opacity .16s, color .16s;
+}
+.drop__cat svg { width: 100%; height: auto; display: block; }
+.drop--over .drop__cat { opacity: 1; color: var(--accent-strong); }
+
+/* У нижнего края страницы — совсем тихо, как подпись */
+.page-cat {
+  max-width: 1480px; margin: 0 auto; padding: 0 20px;
+  color: var(--text-mute); opacity: .22;
+  pointer-events: none;
+}
+.page-cat svg { width: 108px; height: auto; display: block; margin-left: auto; }
+
+@media (max-width: 720px) {
+  .page-cat { width: 84px; padding-right: 13px; }
+  .page-cat svg { width: 84px; }
+}
+@media print { .page-cat, .empty__cat, .drop__cat { display: none; } }

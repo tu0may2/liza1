@@ -12,6 +12,39 @@
 let route = { view: 'dash', cpId: '', sub: 'summary', orderId: '' };
 let filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '', scan: '' };
 
+/* Подглядывающий котик — общий для пустых мест платформы. Контур один,
+   цвет берётся от текста, поэтому он живёт на любой подложке и в обеих
+   темах. Глаза и нос — сквозные отверстия (fill-rule evenodd), так что
+   сквозь них видно фон, а не залитый цвет. */
+function catSVG() {
+  return '<svg viewBox="0 0 128 80" fill="currentColor" aria-hidden="true" focusable="false">' +
+    '<path fill-rule="evenodd" d="' +
+      'M21 44 L30 2 L55 27 C61 23 67 23 73 27 L98 2 L107 44 ' +
+      'C110 54 109 66 108 74 L20 74 C19 66 18 54 21 44 Z ' +
+      'M35 44 a13 14 0 1 0 26 0 a13 14 0 1 0 -26 0 Z ' +
+      'M67 44 a13 14 0 1 0 26 0 a13 14 0 1 0 -26 0 Z ' +
+      'M59 60 L69 60 L64 66 Z' +
+    '"/>' +
+    '<path fill-rule="evenodd" d="' +
+      'M40.5 46 a7.5 7.5 0 1 0 15 0 a7.5 7.5 0 1 0 -15 0 Z ' +
+      'M42.9 42.8 a2.6 2.6 0 1 0 5.2 0 a2.6 2.6 0 1 0 -5.2 0 Z ' +
+      'M72.5 46 a7.5 7.5 0 1 0 15 0 a7.5 7.5 0 1 0 -15 0 Z ' +
+      'M74.9 42.8 a2.6 2.6 0 1 0 5.2 0 a2.6 2.6 0 1 0 -5.2 0 Z' +
+    '"/>' +
+    '<path d="M55 27 L51 15 L59 25 Z M63 24 L63 12 L67 24 Z M71 26 L78 15 L75 28 Z"/>' +
+    '<path d="M5 75 C3 66 8 57 17 56 C20.5 55.6 22 58 22.5 60 C23.5 57.5 25.5 56 28.5 56.2 ' +
+      'C31.5 56.5 33.5 58.2 34 60.6 C35 59 37 58.4 38.5 59.8 C41.5 62.4 39.5 70.5 38.5 75 Z"/>' +
+    '<path d="M123 75 C125 66 120 57 111 56 C107.5 55.6 106 58 105.5 60 C104.5 57.5 102.5 56 99.5 56.2 ' +
+      'C96.5 56.5 94.5 58.2 94 60.6 C93 59 91 58.4 89.5 59.8 C86.5 62.4 88.5 70.5 89.5 75 Z"/>' +
+    '</svg>';
+}
+
+/* Пусто — не повод оставлять дыру: котик выглядывает оттуда, где данных
+   ещё нет, и подсказка объясняет, что делать дальше. */
+function emptyBox(text) {
+  return '<div class="empty"><span class="empty__cat">' + catSVG() + '</span>' + text + '</div>';
+}
+
 /* ------------------------------------------------------------------ */
 /* Мелкие помощники разметки                                          */
 /* ------------------------------------------------------------------ */
@@ -388,6 +421,7 @@ function openFilesModal(docId) {
         '<p class="hint" style="margin-top:0">' + esc(cpName(doc.cpId)) + ' · ' + fmtDate(doc.date) +
           (Number(doc.amount) ? ' · ' + fmtMoney(doc.amount) : '') + '</p>' +
         '<div class="drop" id="drop" tabindex="0" role="button">' +
+          '<span class="drop__cat">' + catSVG() + '</span>' +
           '<b>Перетащите сюда PDF или нажмите, чтобы выбрать</b>' +
           'Можно сразу несколько файлов: неподписанный и подписанный экземпляры. ' +
           'Принимаются PDF и фотографии скана, до ' + MAX_FILE_MB + '\u00a0МБ каждый.' +
@@ -409,7 +443,9 @@ function openFilesModal(docId) {
   function paint() {
     const list = docFiles(doc);
     if (!list.length) {
-      listBox().innerHTML = '<p class="empty">Файлов пока нет</p>';
+      /* Котик уже сидит в зоне загрузки прямо над этим местом — второй
+         подряд был бы перебором */
+      listBox().innerHTML = '<p class="hint" style="text-align:center;margin:0">Файлов пока нет</p>';
       return;
     }
     listBox().innerHTML = '<div class="files">' + list.map((f) =>
@@ -674,7 +710,7 @@ function viewDash() {
       { tools: tableToggle('ch-dash-pay'), note: 'Фактические поступления по дате оплаты. Разрез по договорам — во вкладке «Оплаты».' }) +
     '<div class="grid2">' +
       card('Ближайшие платежи по графику', nearest.length ? schedTable(nearest, { compact: true }) :
-        '<p class="empty">График пуст — добавьте плановые платежи во вкладке «Оплаты»</p>',
+        emptyBox('График пуст — добавьте плановые платежи во вкладке «Оплаты»'),
         { flush: nearest.length > 0, tools: '<button class="btn btn--sm" data-act="go-payments" type="button">Весь график</button>' }) +
       card('Доля в поступлениях', chartSlot('ch-dash-cp', (host) => dotMeters(host, cpRows)),
         { note: 'За всё время. Точки — доля контрагента в общей сумме поступлений.' }) +
@@ -686,7 +722,7 @@ function viewDash() {
 /* ------------------------------------------------------------------ */
 function schedTable(rows, opts) {
   const o = opts || {};
-  if (!rows.length) return '<p class="empty">Строк нет</p>';
+  if (!rows.length) return emptyBox('Строк нет');
   return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
     '<th>Срок</th><th>Состояние</th>' + (o.compact ? '<th>Контрагент</th>' : '<th>Контрагент</th><th>Договор</th><th>Заказ</th>') +
     '<th>Способ</th><th class="num">Сумма</th>' + (o.compact ? '' : '<th>Комментарий</th><th></th>') +
@@ -724,7 +760,7 @@ function docLabel(docId) {
 /* ------------------------------------------------------------------ */
 function payTable(rows, opts) {
   const o = opts || {};
-  if (!rows.length) return '<p class="empty">Оплат по этому фильтру нет</p>';
+  if (!rows.length) return emptyBox('Оплат по этому фильтру нет');
   return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
     '<th>Дата</th>' + (o.hideCp ? '' : '<th>Контрагент</th>') + '<th>Договор</th><th>Заказ</th><th>Счёт</th>' +
     '<th>Способ</th><th class="num">Сумма</th><th>Комментарий</th><th></th>' +
@@ -766,7 +802,7 @@ function invoicePaidHTML(doc) {
 /* ------------------------------------------------------------------ */
 function docTable(rows, opts) {
   const o = opts || {};
-  if (!rows.length) return '<p class="empty">Документов по этому фильтру нет</p>';
+  if (!rows.length) return emptyBox('Документов по этому фильтру нет');
   /* В узкой карточке показываем только то, что помещается без прокрутки:
      остальное — в полной истории документов контрагента */
   if (o.compact) {
@@ -815,7 +851,7 @@ function docTable(rows, opts) {
 /* ------------------------------------------------------------------ */
 function orderTable(rows, opts) {
   const o = opts || {};
-  if (!rows.length) return '<p class="empty">Заказов по этому фильтру нет</p>';
+  if (!rows.length) return emptyBox('Заказов по этому фильтру нет');
   return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
     '<th>Дата</th><th>Номер</th>' + (o.hideCp ? '' : '<th>Контрагент</th>') + '<th>Договор</th>' +
     '<th>Статус</th><th class="num">Позиций</th><th class="num">Сумма</th>' +
@@ -952,7 +988,7 @@ function cpSummary(c) {
         '<th>Договор</th><th>Реквизиты</th><th class="num">Выставлено</th><th class="num">Безнал</th>' +
         '<th class="num">Нал</th><th class="num">Долг</th><th>Условия оплаты</th></tr></thead><tbody>' +
         perContract + '</tbody></table></div>'
-        : '<p class="empty">Договоров нет — добавьте во вкладке «Договоры»</p>',
+        : emptyBox('Договоров нет — добавьте во вкладке «Договоры»'),
       { flush: c.contracts.length > 0 }) +
     card('Оплаты по месяцам и договорам',
       chartSlot('ch-cp-pay', (host) => stackedBars(host, { labels: labels, series: byContract }),
@@ -960,9 +996,9 @@ function cpSummary(c) {
       { tools: tableToggle('ch-cp-pay'),
         note: 'Цвет закреплён за договором: основной — зелёный, бартерный — синий.' }) +
     '<div class="grid2">' +
-      card('Последние документы', docs.length ? docTable(docs, { hideCp: true, compact: true }) : '<p class="empty">Документов нет</p>',
+      card('Последние документы', docs.length ? docTable(docs, { hideCp: true, compact: true }) : emptyBox('Документов нет'),
         { flush: docs.length > 0, tools: '<button class="btn btn--sm" data-sub="docs" type="button">Вся история</button>' }) +
-      card('График платежей', sched.length ? schedTable(sched.slice(0, 8), { compact: true }) : '<p class="empty">График пуст</p>',
+      card('График платежей', sched.length ? schedTable(sched.slice(0, 8), { compact: true }) : emptyBox('График пуст'),
         { flush: sched.length > 0, tools: '<button class="btn btn--sm" data-sub="schedule" type="button">Весь график</button>' }) +
     '</div>';
 }
@@ -1088,7 +1124,7 @@ function cpContracts(c) {
       '<th>Название</th><th>Номер</th><th>Дата</th><th>Условия оплаты</th>' +
       '<th class="num">Выставлено</th><th class="num">Оплачено</th><th class="num">Долг</th>' +
       '<th>Комментарий</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
-      : '<p class="empty">Договоров нет</p>',
+      : emptyBox('Договоров нет'),
     { flush: c.contracts.length > 0,
       tools: '<button class="btn btn--primary btn--sm" data-act="contract-new" data-cp="' + esc(c.id) + '" type="button">+ Договор</button>',
       note: 'У одного контрагента может быть сколько угодно договоров — оплаты, заказы и документы привязываются к конкретному.' });
@@ -1193,10 +1229,10 @@ function viewOrderEdit() {
     card('Позиции заказа', items + '<div style="margin-top:12px">' + actions + '</div>',
       { note: 'Счёт и спецификация создаются на текущую сумму заказа и сразу попадают в историю документов контрагента.' }) +
     '<div class="grid2">' +
-      card('Документы по заказу', docs.length ? docTable(docs, { hideCp: true }) : '<p class="empty">Документов по заказу нет</p>',
+      card('Документы по заказу', docs.length ? docTable(docs, { hideCp: true }) : emptyBox('Документов по заказу нет'),
         { flush: docs.length > 0 }) +
       card('Оплаты по заказу',
-        (pays.length ? payTable(pays, { hideCp: true }) : '<p class="empty">Оплат по заказу нет</p>') +
+        (pays.length ? payTable(pays, { hideCp: true }) : emptyBox('Оплат по заказу нет')) +
         (sched.length ? '<div style="padding:12px"><h3 style="margin-bottom:8px">В графике</h3></div>' + schedTable(sched, { compact: true }) : ''),
         { flush: true }) +
     '</div>';
@@ -1486,7 +1522,7 @@ function viewAnalytics() {
         '<td class="num">' + fmtMoney(chainRows.reduce((a, r) => a + r.ch.paid, 0)) + '</td>' +
         '<td class="num">' + fmtMoney(chainRows.reduce((a, r) => a + Math.max(0, r.ch.left), 0)) + '</td>' +
         '<td></td></tr></tfoot></table></div>'
-    : '<p class="empty">Заказов по этому фильтру нет</p>';
+    : emptyBox('Заказов по этому фильтру нет');
 
   return filtersHTML({ cp: true, contract: true, period: true }) +
     '<div class="kpi-grid">' +
@@ -1542,7 +1578,7 @@ function viewCps() {
       '<th>Название</th><th>Полное название</th><th>ИНН</th><th>Договоры</th><th>Контакт</th>' +
       '<th class="num">Заказов</th><th class="num">Оплачено</th><th class="num">Долг</th><th></th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table></div>'
-      : '<p class="empty">Пока никого нет — добавьте первого контрагента</p>',
+      : emptyBox('Пока никого нет — добавьте первого контрагента'),
     { flush: db().counterparties.length > 0,
       tools: '<button class="btn btn--primary btn--sm" data-act="cp-new" type="button">+ Новый контрагент</button>',
       note: 'У каждого контрагента появляется своя вкладка в верхнем ряду — вся его история в одном месте.' });
@@ -2138,6 +2174,10 @@ function init() {
       updateOrderLive();
     }
   });
+
+  /* Котик у нижнего края страницы — тот же контур, что и в пустых местах */
+  const pageCat = document.getElementById('page-cat');
+  if (pageCat) pageCat.innerHTML = catSVG();
 
   /* Ширина графиков считается от контейнера, поэтому при изменении окна
      их надо перерисовать. Ждём, пока размер перестанет меняться. */

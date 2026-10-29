@@ -141,7 +141,7 @@ function stackedBars(host, opts) {
   const fmt = opts.fmt || fmtShort;
   host.innerHTML = '';
   if (!labels.length || !series.length) {
-    host.innerHTML = '<p class="empty">Нет данных за выбранный период</p>';
+    host.innerHTML = emptyBox('Нет данных за выбранный период');
     return;
   }
 
@@ -262,7 +262,7 @@ function lineChart(host, opts) {
   const fmt = opts.fmt || fmtShort;
   host.innerHTML = '';
   if (!labels.length || !series.length) {
-    host.innerHTML = '<p class="empty">Нет данных за выбранный период</p>';
+    host.innerHTML = emptyBox('Нет данных за выбранный период');
     return;
   }
 
@@ -356,7 +356,7 @@ function hBars(host, rows, opts) {
   const totals = rows.map((r) => r.parts.reduce((s, p) => s + (Number(p.value) || 0), 0));
   const max = Math.max.apply(null, totals.concat([0]));
   if (!rows.length || !max) {
-    host.innerHTML = '<p class="empty">Нет данных</p>';
+    host.innerHTML = emptyBox('Нет данных');
     return;
   }
   const legendSeries = [];
@@ -465,7 +465,7 @@ function donutChart(host, items, opts) {
   host.innerHTML = '';
   const live = items.filter((x) => Number(x.value) > 0);
   const total = live.reduce((s, x) => s + Number(x.value), 0);
-  if (!total) { host.innerHTML = '<p class="empty">Нет данных</p>'; return; }
+  if (!total) { host.innerHTML = emptyBox('Нет данных'); return; }
 
   const wrap = document.createElement('div');
   wrap.className = 'donut';
@@ -520,7 +520,7 @@ function dotMeters(host, rows, opts) {
   const o = opts || {};
   host.innerHTML = '';
   const total = rows.reduce((s, r) => s + (Number(r.value) || 0), 0);
-  if (!total) { host.innerHTML = '<p class="empty">Нет данных</p>'; return; }
+  if (!total) { host.innerHTML = emptyBox('Нет данных'); return; }
   const DOTS = 10;
   host.innerHTML = '<div class="meters">' + rows.map((r) => {
     const pct = (Number(r.value) || 0) / total * 100;
