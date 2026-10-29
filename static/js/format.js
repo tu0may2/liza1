@@ -1,0 +1,103 @@
+/* Форматирование чисел и дат. Везде русская локаль: разряды неразрывными
+   пробелами, десятичная запятая. */
+'use strict';
+
+const RUB = '₽';
+const NBSP = ' ';
+
+function fmtMoney(v, opts) {
+  const o = opts || {};
+  const n = Number(v) || 0;
+  const digits = o.digits == null ? 0 : o.digits;
+  const s = n.toLocaleString('ru-RU', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  return o.bare ? s : s + NBSP + RUB;
+}
+
+/* Короткая запись для осей и плиток: 1,2 млн вместо 1 200 000 */
+function fmtShort(v) {
+  const n = Number(v) || 0;
+  const a = Math.abs(n);
+  if (a >= 1e9) return (n / 1e9).toLocaleString('ru-RU', { maximumFractionDigits: 1 }) + NBSP + 'млрд';
+  if (a >= 1e6) return (n / 1e6).toLocaleString('ru-RU', { maximumFractionDigits: 1 }) + NBSP + 'млн';
+  if (a >= 1e4) return Math.round(n / 1e3).toLocaleString('ru-RU') + NBSP + 'тыс';
+  return n.toLocaleString('ru-RU', { maximumFractionDigits: 0 });
+}
+
+function fmtQty(v) {
+  const n = Number(v) || 0;
+  return n.toLocaleString('ru-RU', { maximumFractionDigits: 3 });
+}
+
+function fmtPct(v, digits) {
+  const n = Number(v) || 0;
+  return n.toLocaleString('ru-RU', { maximumFractionDigits: digits == null ? 1 : digits }) + NBSP + '%';
+}
+
+/* ISO-дата (ГГГГ-ММ-ДД) — единственный формат хранения. */
+function today() {
+  const d = new Date();
+  return iso(d);
+}
+
+function iso(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+function parseISO(s) {
+  if (!s) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s).trim());
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function fmtDate(s) {
+  const d = parseISO(s);
+  if (!d) return '—';
+  const p = (n) => String(n).padStart(2, '0');
+  return p(d.getDate()) + '.' + p(d.getMonth() + 1) + '.' + d.getFullYear();
+}
+
+const MONTHS = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+
+function monthKey(s) { return String(s || '').slice(0, 7); }
+
+function fmtMonth(key) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(key || ''));
+  if (!m) return String(key || '');
+  return MONTHS[Number(m[2]) - 1] + NBSP + m[1].slice(2);
+}
+
+/* Сдвиг на n месяцев от текущего, в формате ГГГГ-ММ */
+function monthShift(n) {
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + n);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+/* Разница в днях: положительная — дата в будущем */
+function daysFromToday(s) {
+  const d = parseISO(s);
+  if (!d) return null;
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  return Math.round((d - now) / 86400000);
+}
+
+function plural(n, one, few, many) {
+  const a = Math.abs(n) % 100, b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  if (b === 1) return one;
+  return many;
+}
+
+/* Экранирование: всё, что пришло от пользователя, попадает в разметку
+   только через эту функцию */
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}

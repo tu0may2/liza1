@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Платформа продаж</title>
+  <meta name="description" content="Учёт контрагентов, заказов, документов и оплат: история по каждому контрагенту, график платежей, аналитика.">
+  <link rel="stylesheet" href="static/css/app.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📘</text></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar__brand">
+      <span class="topbar__logo">₽</span>
+      <div>
+        <h1>Платформа продаж</h1>
+        <p class="topbar__subtitle">Контрагенты · документы · оплаты · аналитика</p>
+      </div>
+    </div>
+
+    <div class="topbar__actions">
+      <button class="btn" id="btn-theme" type="button" title="Сменить тему">☀</button>
+      <button class="btn" data-act="cp-new" type="button">+ Контрагент</button>
+      <button class="btn btn--primary" data-act="order-new" type="button">+ Новый заказ</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs" aria-label="Разделы"></nav>
+
+  <main id="main"></main>
+
+  <!-- Порядок важен: format и store не зависят ни от кого, charts берёт
+       форматирование, app использует всё остальное. Обычные скрипты, а не
+       модули: страница должна открываться прямо из файла, без сервера. -->
+  <script src="static/js/format.js"></script>
+  <script src="static/js/store.js"></script>
+  <script src="static/js/charts.js"></script>
+  <script src="static/js/app.js"></script>
+</body>
+</html>

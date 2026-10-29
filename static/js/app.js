@@ -1,0 +1,1642 @@
+/* Экраны платформы и их отрисовка.
+
+   Навигация плоская: верхний ряд вкладок — разделы, у каждого контрагента
+   своя вкладка в том же ряду. Внутри контрагента второй ряд вкладок:
+   документы, заказы, оплаты, график, договоры, реквизиты.
+
+   Отрисовка целиком перестраивает содержимое раздела из состояния —
+   никакой точечной правки DOM, поэтому расхождений между экраном и
+   данными не бывает. */
+'use strict';
+
+let route = { view: 'dash', cpId: '', sub: 'summary', orderId: '' };
+let filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '' };
+
+/* ------------------------------------------------------------------ */
+/* Мелкие помощники разметки                                          */
+/* ------------------------------------------------------------------ */
+function tag(text, cls) { return '<span class="tag ' + (cls || '') + '">' + esc(text) + '</span>'; }
+
+function contractTag(cpId, contractId) {
+  const k = contractById(cpId, contractId);
+  if (!k) return '<span class="hint">без договора</span>';
+  const kind = CONTRACT_KINDS[k.kind] || CONTRACT_KINDS.other;
+  return '<span class="tag ' + kind.tag + '"><i class="swatch" style="background:' + kind.color + '"></i>' +
+    esc(k.name) + '</span>';
+}
+
+function methodTag(method) {
+  const m = PAY_METHODS[method] || PAY_METHODS.bank;
+  return '<span class="tag"><i class="swatch" style="background:' + m.color + '"></i>' + esc(m.label) + '</span>';
+}
+
+function orderTag(status) {
+  const s = ORDER_STATUSES[status] || ORDER_STATUSES.draft;
+  return tag(s.label, s.tag);
+}
+
+function docTag(status) {
+  const s = DOC_STATUSES[status] || DOC_STATUSES.draft;
+  return tag(s.label, s.tag);
+}
+
+function kpi(label, value, hint, cls) {
+  return '<div class="kpi ' + (cls || '') + '"><div class="kpi__label">' + esc(label) + '</div>' +
+    '<div class="kpi__value">' + value + '</div>' +
+    (hint ? '<div class="kpi__hint">' + hint + '</div>' : '') + '</div>';
+}
+
+function card(title, bodyHTML, opts) {
+  const o = opts || {};
+  return '<article class="card"' + (o.id ? ' id="' + o.id + '"' : '') + '>' +
+    '<header class="card__head"><h2>' + esc(title) + '</h2>' +
+    (o.tools ? '<div class="card__tools">' + o.tools + '</div>' : '') + '</header>' +
+    '<div class="card__body' + (o.flush ? ' card__body--flush' : '') + '">' + bodyHTML + '</div>' +
+    (o.note ? '<p class="card__note">' + o.note + '</p>' : '') + '</article>';
+}
+
+function selectOptions(pairs, current) {
+  return pairs.map((p) => '<option value="' + esc(p[0]) + '"' +
+    (String(p[0]) === String(current == null ? '' : current) ? ' selected' : '') + '>' + esc(p[1]) + '</option>').join('');
+}
+
+function cpOptions(includeAll) {
+  const list = includeAll ? [['', 'Все контрагенты']] : [];
+  return list.concat(db().counterparties.map((c) => [c.id, c.name]));
+}
+
+function contractOptions(cpId, includeAll) {
+  const list = includeAll ? [['', 'Все договоры']] : [['', '— без договора —']];
+  const cps = cpId ? [cpById(cpId)].filter(Boolean) : db().counterparties;
+  cps.forEach((c) => c.contracts.forEach((k) => {
+    list.push([k.id, (cpId ? '' : c.name + ' · ') + k.name + ' №' + (k.number || '—')]);
+  }));
+  return list;
+}
+
+function orderOptions(cpId) {
+  const list = [['', '— без заказа —']];
+  db().orders.filter((o) => !cpId || o.cpId === cpId).forEach((o) => {
+    list.push([o.id, 'Заказ ' + (o.number || o.id.slice(-4)) + ' от ' + fmtDate(o.date) +
+      (cpId ? '' : ' · ' + cpName(o.cpId))]);
+  });
+  return list;
+}
+
+/* ------------------------------------------------------------------ */
+/* Выборки и расчёты                                                  */
+/* ------------------------------------------------------------------ */
+function inPeriod(dateStr, from, to) {
+  if (from && String(dateStr) < from) return false;
+  if (to && String(dateStr) > to) return false;
+  return true;
+}
+
+function paymentsOf(opts) {
+  const o = opts || {};
+  return db().payments.filter((p) =>
+    (!o.cpId || p.cpId === o.cpId) &&
+    (!o.contractId || p.contractId === o.contractId) &&
+    (!o.method || p.method === o.method) &&
+    (!o.orderId || p.orderId === o.orderId) &&
+    inPeriod(p.date, o.from, o.to)
+  ).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+}
+
+function ordersOf(opts) {
+  const o = opts || {};
+  return db().orders.filter((x) =>
+    (!o.cpId || x.cpId === o.cpId) &&
+    (!o.contractId || x.contractId === o.contractId) &&
+    (!o.status || x.status === o.status) &&
+    inPeriod(x.date, o.from, o.to)
+  ).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+}
+
+function docsOf(opts) {
+  const o = opts || {};
+  return db().documents.filter((d) =>
+    (!o.cpId || d.cpId === o.cpId) &&
+    (!o.contractId || d.contractId === o.contractId) &&
+    (!o.type || d.type === o.type) &&
+    (!o.orderId || d.orderId === o.orderId) &&
+    inPeriod(d.date, o.from, o.to)
+  ).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+}
+
+function scheduleOf(opts) {
+  const o = opts || {};
+  return db().schedule.filter((s) =>
+    (!o.cpId || s.cpId === o.cpId) &&
+    (!o.contractId || s.contractId === o.contractId) &&
+    (!o.method || s.method === o.method)
+  ).sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
+}
+
+function sum(list, field) {
+  return list.reduce((s, x) => s + (Number(x[field == null ? 'amount' : field]) || 0), 0);
+}
+
+/* Состояние строки графика: оплачено вручную, просрочено или ожидается */
+function schedStatus(s) {
+  if (s.status === 'paid') return { key: 'paid', label: 'Оплачено', tag: 'tag--ok' };
+  const d = daysFromToday(s.dueDate);
+  if (d == null) return { key: 'plan', label: 'Без срока', tag: '' };
+  if (d < 0) return { key: 'overdue', label: 'Просрочено на ' + Math.abs(d) + ' ' + plural(Math.abs(d), 'день', 'дня', 'дней'), tag: 'tag--bad' };
+  if (d <= 7) return { key: 'soon', label: d === 0 ? 'Сегодня' : 'Через ' + d + ' ' + plural(d, 'день', 'дня', 'дней'), tag: 'tag--warn' };
+  return { key: 'plan', label: 'Через ' + d + ' ' + plural(d, 'день', 'дня', 'дней'), tag: 'tag--info' };
+}
+
+/* Оплачено по заказу — из фактических оплат, привязанных к заказу */
+function paidByOrder(orderId) {
+  return sum(db().payments.filter((p) => p.orderId === orderId));
+}
+
+/* Долг контрагента: выставлено счетами минус оплачено. Договоры и
+   спецификации в сумму долга не входят — счёт определяет требование. */
+function balanceOf(cpId, contractId) {
+  const inv = db().documents.filter((d) => d.cpId === cpId && d.type === 'invoice' &&
+    (!contractId || d.contractId === contractId) && d.status !== 'rejected');
+  const paid = db().payments.filter((p) => p.cpId === cpId && (!contractId || p.contractId === contractId));
+  return { invoiced: sum(inv), paid: sum(paid), debt: sum(inv) - sum(paid) };
+}
+
+/* Список месяцев от самой ранней записи до самой поздней, но не больше 18 */
+function monthRange(dates, minCount) {
+  const keys = dates.map(monthKey).filter((k) => /^\d{4}-\d{2}$/.test(k)).sort();
+  const nowKey = monthShift(0);
+  let first = keys.length ? keys[0] : nowKey;
+  let last = keys.length ? keys[keys.length - 1] : nowKey;
+  if (last < nowKey) last = nowKey;
+  const out = [];
+  let [y, m] = first.split('-').map(Number);
+  for (let guard = 0; guard < 120; guard++) {
+    const key = y + '-' + String(m).padStart(2, '0');
+    out.push(key);
+    if (key >= last) break;
+    m++; if (m > 12) { m = 1; y++; }
+  }
+  const want = minCount || 6;
+  return out.length > 18 ? out.slice(-18) : out.length < want ? out : out;
+}
+
+function byMonth(list, dateField, months, pick) {
+  const idx = {};
+  months.forEach((k, i) => { idx[k] = i; });
+  const out = months.map(() => 0);
+  list.forEach((x) => {
+    const i = idx[monthKey(x[dateField])];
+    if (i != null) out[i] += pick ? pick(x) : (Number(x.amount) || 0);
+  });
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* Модальная форма                                                    */
+/* ------------------------------------------------------------------ */
+/* fields: [{ name, label, type, options, value, wide, required, step, hint }]
+   type: text | number | date | select | textarea */
+function openForm(cfg) {
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  const fields = cfg.fields.filter(Boolean);
+
+  back.innerHTML =
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="' + esc(cfg.title) + '">' +
+      '<header class="modal__head"><h2>' + esc(cfg.title) + '</h2>' +
+        '<button class="btn btn--sm" data-close type="button">Закрыть</button></header>' +
+      '<form class="modal__body" id="modal-form"><div class="form-grid">' +
+        fields.map((f) => {
+          const id = 'f-' + f.name;
+          let input;
+          if (f.type === 'select') {
+            input = '<select id="' + id + '" name="' + esc(f.name) + '"' + (f.required ? ' required' : '') + '>' +
+              selectOptions(f.options || [], f.value) + '</select>';
+          } else if (f.type === 'textarea') {
+            input = '<textarea id="' + id + '" name="' + esc(f.name) + '">' + esc(f.value || '') + '</textarea>';
+          } else {
+            input = '<input id="' + id + '" name="' + esc(f.name) + '" type="' + (f.type || 'text') + '"' +
+              (f.type === 'number' ? ' step="' + (f.step || 'any') + '" inputmode="decimal"' : '') +
+              ' value="' + esc(f.value == null ? '' : f.value) + '"' + (f.required ? ' required' : '') + '>';
+          }
+          return '<label class="field' + (f.wide ? ' field--wide' : '') + '"><span>' + esc(f.label) + '</span>' +
+            input + (f.hint ? '<span class="hint">' + esc(f.hint) + '</span>' : '') + '</label>';
+        }).join('') +
+      '</div></form>' +
+      '<footer class="modal__foot">' +
+        (cfg.onDelete ? '<button class="btn btn--danger" data-del type="button">Удалить</button>' : '') +
+        '<button class="btn" data-close type="button">Отмена</button>' +
+        '<button class="btn btn--primary" data-save type="button">' + esc(cfg.saveLabel || 'Сохранить') + '</button>' +
+      '</footer>' +
+    '</div>';
+
+  const close = () => { document.removeEventListener('keydown', onKey); back.remove(); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+
+  const collect = () => {
+    const form = back.querySelector('#modal-form');
+    const out = {};
+    fields.forEach((f) => {
+      const node = form.elements[f.name];
+      if (!node) return;
+      out[f.name] = f.type === 'number'
+        ? (node.value === '' ? 0 : Number(String(node.value).replace(',', '.')))
+        : node.value.trim();
+    });
+    return out;
+  };
+
+  back.addEventListener('click', (e) => {
+    if (e.target === back || e.target.closest('[data-close]')) { close(); return; }
+    if (e.target.closest('[data-del]')) {
+      if (confirm('Удалить запись? Действие нельзя отменить.')) { cfg.onDelete(); close(); render(); }
+      return;
+    }
+    if (e.target.closest('[data-save]')) {
+      const form = back.querySelector('#modal-form');
+      if (!form.reportValidity()) return;
+      const values = collect();
+      const err = cfg.validate ? cfg.validate(values) : null;
+      if (err) { alert(err); return; }
+      cfg.onSave(values);
+      close();
+      render();
+    }
+  });
+
+  /* Связанные списки: при смене контрагента перестраиваем договоры и заказы */
+  back.addEventListener('change', (e) => {
+    if (e.target.name !== 'cpId') return;
+    const cpId = e.target.value;
+    const kSel = back.querySelector('[name="contractId"]');
+    if (kSel) kSel.innerHTML = selectOptions(contractOptions(cpId, false), '');
+    const oSel = back.querySelector('[name="orderId"]');
+    if (oSel) oSel.innerHTML = selectOptions(orderOptions(cpId), '');
+  });
+
+  document.body.appendChild(back);
+  const first = back.querySelector('input, select, textarea');
+  if (first) first.focus();
+}
+
+/* ------------------------------------------------------------------ */
+/* Навигация                                                          */
+/* ------------------------------------------------------------------ */
+function navHTML() {
+  const cps = db().counterparties;
+  const items = [['dash', 'Обзор']];
+  const tabs = items.map((it) =>
+    '<button class="tab' + (route.view === it[0] ? ' tab--active' : '') + '" data-nav="' + it[0] + '" type="button">' +
+    esc(it[1]) + '</button>').join('');
+
+  const cpTabs = cps.map((c, i) => {
+    const color = 'var(--c' + ((i % 4) + 1) + ')';
+    const active = route.view === 'cp' && route.cpId === c.id;
+    return '<button class="tab' + (active ? ' tab--active' : '') + '" data-nav="cp" data-cp="' + esc(c.id) + '" type="button">' +
+      '<i class="tab__dot" style="background:' + color + '"></i>' + esc(c.name) + '</button>';
+  }).join('');
+
+  const rest = [['orders', 'Заказы'], ['payments', 'Оплаты'], ['docs', 'Документы'],
+                ['analytics', 'Аналитика'], ['cps', 'Контрагенты'], ['data', 'Данные']];
+  const restTabs = rest.map((it) =>
+    '<button class="tab' + (route.view === it[0] ? ' tab--active' : '') + '" data-nav="' + it[0] + '" type="button">' +
+    esc(it[1]) + '</button>').join('');
+
+  return tabs + cpTabs + restTabs;
+}
+
+function go(view, extra) {
+  route = Object.assign({ view: view, cpId: '', sub: 'summary', orderId: '' }, extra || {});
+  if (view === 'cp' && !route.sub) route.sub = 'summary';
+  window.scrollTo({ top: 0 });
+  render();
+}
+
+/* ------------------------------------------------------------------ */
+/* Фильтры (общая полоса)                                            */
+/* ------------------------------------------------------------------ */
+function filtersHTML(opts) {
+  const o = opts || {};
+  let html = '<div class="filters">';
+  if (o.cp) {
+    html += '<label class="field"><span>Контрагент</span><select data-filter="cpId">' +
+      selectOptions(cpOptions(true), filters.cpId) + '</select></label>';
+  }
+  if (o.contract) {
+    html += '<label class="field"><span>Договор</span><select data-filter="contractId">' +
+      selectOptions(contractOptions(filters.cpId, true), filters.contractId) + '</select></label>';
+  }
+  if (o.method) {
+    html += '<label class="field"><span>Способ</span><select data-filter="method">' +
+      selectOptions([['', 'Нал и безнал'], ['bank', 'Безнал'], ['cash', 'Нал']], filters.method) + '</select></label>';
+  }
+  if (o.status) {
+    html += '<label class="field"><span>Статус</span><select data-filter="status">' +
+      selectOptions([['', 'Любой']].concat(Object.keys(ORDER_STATUSES).map((k) => [k, ORDER_STATUSES[k].label])), filters.status) +
+      '</select></label>';
+  }
+  if (o.period) {
+    html += '<label class="field"><span>С даты</span><input type="date" data-filter="from" value="' + esc(filters.from) + '"></label>' +
+      '<label class="field"><span>По дату</span><input type="date" data-filter="to" value="' + esc(filters.to) + '"></label>';
+  }
+  html += '<button class="btn" data-act="filters-reset" type="button">Сбросить</button>';
+  if (o.extra) html += o.extra;
+  return html + '</div>';
+}
+
+/* ------------------------------------------------------------------ */
+/* Графики рисуются после вставки разметки: им нужен готовый DOM       */
+/* ------------------------------------------------------------------ */
+let chartJobs = [];
+
+function chartSlot(id, draw, tableHTML) {
+  chartJobs.push({ id: id, draw: draw });
+  return '<div class="chart" id="' + id + '"></div>' +
+    (tableHTML ? '<div id="' + id + '-tbl" hidden style="margin-top:10px">' + tableHTML + '</div>' : '');
+}
+
+function tableToggle(id) {
+  return '<button class="btn btn--sm" data-act="toggle-table" data-target="' + id + '-tbl" type="button">Таблицей</button>';
+}
+
+/* ------------------------------------------------------------------ */
+/* Обзор                                                              */
+/* ------------------------------------------------------------------ */
+function viewDash() {
+  const d = db();
+  const thisMonth = monthShift(0);
+  const paidThis = sum(d.payments.filter((p) => monthKey(p.date) === thisMonth));
+  const paidPrev = sum(d.payments.filter((p) => monthKey(p.date) === monthShift(-1)));
+  const sched = d.schedule.filter((s) => s.status !== 'paid');
+  const overdue = sched.filter((s) => schedStatus(s).key === 'overdue');
+  const soon = sched.filter((s) => ['soon', 'plan'].indexOf(schedStatus(s).key) >= 0 && monthKey(s.dueDate) === thisMonth);
+  const debtTotal = d.counterparties.reduce((s, c) => s + Math.max(0, balanceOf(c.id).debt), 0);
+  const activeOrders = d.orders.filter((o) => ['draft', 'agreed', 'documented'].indexOf(o.status) >= 0);
+
+  const delta = paidPrev ? ((paidThis - paidPrev) / paidPrev * 100) : null;
+  const kpis =
+    kpi('Оплаты за ' + fmtMonth(thisMonth), fmtMoney(paidThis),
+        delta == null ? 'за прошлый месяц данных нет'
+          : (delta >= 0 ? '▲ ' : '▼ ') + fmtPct(Math.abs(delta)) + ' к прошлому месяцу',
+        delta == null ? '' : (delta >= 0 ? 'kpi--up' : 'kpi--down')) +
+    kpi('Ожидается в этом месяце', fmtMoney(sum(soon, 'amount')),
+        soon.length + ' ' + plural(soon.length, 'платёж', 'платежа', 'платежей') + ' по графику') +
+    kpi('Просрочено', fmtMoney(sum(overdue, 'amount')),
+        overdue.length ? overdue.length + ' ' + plural(overdue.length, 'строка', 'строки', 'строк') + ' графика' : 'нет просрочки',
+        overdue.length ? 'kpi--down' : '') +
+    kpi('Долг по счётам', fmtMoney(debtTotal), 'выставлено минус оплачено, авансы не вычитаются',
+        debtTotal > 0 ? 'kpi--warn' : '') +
+    kpi('Заказы в работе', String(activeOrders.length),
+        fmtMoney(activeOrders.reduce((s, o) => s + orderTotal(o), 0)) + ' на сумму');
+
+  /* Оплаты по месяцам: разделение нал/безнал — то, что спрашивают первым */
+  const months = monthRange(d.payments.map((p) => p.date).concat(d.schedule.map((s) => s.dueDate)));
+  const payMonths = months.map(fmtMonth);
+  const seriesMethod = Object.keys(PAY_METHODS).map((k) => ({
+    key: k, label: PAY_METHODS[k].label, color: PAY_METHODS[k].color,
+    values: byMonth(d.payments.filter((p) => p.method === k), 'date', months)
+  }));
+
+  const nearest = sched.slice().sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate))).slice(0, 8);
+
+  const cpRows = d.counterparties.map((c) => ({
+    label: c.name,
+    parts: Object.keys(PAY_METHODS).map((k) => ({
+      label: PAY_METHODS[k].label, color: PAY_METHODS[k].color,
+      value: sum(d.payments.filter((p) => p.cpId === c.id && p.method === k))
+    }))
+  })).sort((a, b) => b.parts.reduce((s, p) => s + p.value, 0) - a.parts.reduce((s, p) => s + p.value, 0));
+
+  return '<div class="kpi-grid">' + kpis + '</div>' +
+    card('Оплаты по месяцам — нал и безнал',
+      chartSlot('ch-dash-pay', (host) => stackedBars(host, { labels: payMonths, series: seriesMethod }),
+        seriesTable(payMonths, seriesMethod)),
+      { tools: tableToggle('ch-dash-pay'), note: 'Фактические поступления по дате оплаты. Разрез по договорам — во вкладке «Оплаты».' }) +
+    '<div class="grid2">' +
+      card('Ближайшие платежи по графику', nearest.length ? schedTable(nearest, { compact: true }) :
+        '<p class="empty">График пуст — добавьте плановые платежи во вкладке «Оплаты»</p>',
+        { flush: nearest.length > 0, tools: '<button class="btn btn--sm" data-act="go-payments" type="button">Весь график</button>' }) +
+      card('Поступления по контрагентам', chartSlot('ch-dash-cp', (host) => hBars(host, cpRows)),
+        { note: 'За всё время, с разбивкой по способу оплаты.' }) +
+    '</div>';
+}
+
+/* ------------------------------------------------------------------ */
+/* Таблица графика платежей                                           */
+/* ------------------------------------------------------------------ */
+function schedTable(rows, opts) {
+  const o = opts || {};
+  if (!rows.length) return '<p class="empty">Строк нет</p>';
+  return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+    '<th>Срок</th><th>Состояние</th>' + (o.compact ? '<th>Контрагент</th>' : '<th>Контрагент</th><th>Договор</th><th>Заказ</th>') +
+    '<th>Способ</th><th class="num">Сумма</th>' + (o.compact ? '' : '<th>Комментарий</th><th></th>') +
+    '</tr></thead><tbody>' +
+    rows.map((s) => {
+      const st = schedStatus(s);
+      return '<tr><td class="nowrap">' + fmtDate(s.dueDate) + '</td>' +
+        '<td>' + tag(st.label, st.tag) + '</td>' +
+        '<td class="nowrap">' + esc(cpName(s.cpId)) + '</td>' +
+        (o.compact ? '' : '<td>' + contractTag(s.cpId, s.contractId) + '</td>' +
+          '<td class="nowrap">' + (s.orderId ? esc(orderLabel(s.orderId)) : '<span class="hint">—</span>') + '</td>') +
+        '<td>' + methodTag(s.method) + '</td>' +
+        '<td class="num">' + fmtMoney(s.amount) + '</td>' +
+        (o.compact ? '' : '<td>' + esc(s.note || '') + '</td>' +
+          '<td><div class="row-actions">' +
+            (s.status === 'paid' ? '' : '<button class="btn btn--sm btn--primary" data-act="sched-pay" data-id="' + esc(s.id) + '" type="button">Оплачено</button>') +
+            '<button class="btn btn--sm" data-act="sched-edit" data-id="' + esc(s.id) + '" type="button">Правка</button>' +
+          '</div></td>') +
+        '</tr>';
+    }).join('') +
+    '</tbody><tfoot><tr><td colspan="' + (o.compact ? 4 : 6) + '">Итого</td>' +
+    '<td class="num">' + fmtMoney(sum(rows, 'amount')) + '</td>' + (o.compact ? '' : '<td colspan="2"></td>') +
+    '</tr></tfoot></table></div>';
+}
+
+/* ------------------------------------------------------------------ */
+/* Таблица фактических оплат                                          */
+/* ------------------------------------------------------------------ */
+function payTable(rows, opts) {
+  const o = opts || {};
+  if (!rows.length) return '<p class="empty">Оплат по этому фильтру нет</p>';
+  return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+    '<th>Дата</th>' + (o.hideCp ? '' : '<th>Контрагент</th>') + '<th>Договор</th><th>Заказ</th>' +
+    '<th>Способ</th><th class="num">Сумма</th><th>Комментарий</th><th></th>' +
+    '</tr></thead><tbody>' +
+    rows.map((p) => '<tr>' +
+      '<td class="nowrap">' + fmtDate(p.date) + '</td>' +
+      (o.hideCp ? '' : '<td class="nowrap">' + esc(cpName(p.cpId)) + '</td>') +
+      '<td>' + contractTag(p.cpId, p.contractId) + '</td>' +
+      '<td class="nowrap">' + (p.orderId ? esc(orderLabel(p.orderId)) : '<span class="hint">—</span>') + '</td>' +
+      '<td>' + methodTag(p.method) + '</td>' +
+      '<td class="num">' + fmtMoney(p.amount) + '</td>' +
+      '<td>' + esc(p.note || '') + '</td>' +
+      '<td><button class="btn btn--sm" data-act="pay-edit" data-id="' + esc(p.id) + '" type="button">Правка</button></td>' +
+      '</tr>').join('') +
+    '</tbody><tfoot><tr><td colspan="' + (o.hideCp ? 4 : 5) + '">Итого ' + rows.length + ' ' +
+    plural(rows.length, 'оплата', 'оплаты', 'оплат') + '</td>' +
+    '<td class="num">' + fmtMoney(sum(rows, 'amount')) + '</td><td colspan="2"></td></tr></tfoot></table></div>';
+}
+
+/* ------------------------------------------------------------------ */
+/* Таблица документов                                                 */
+/* ------------------------------------------------------------------ */
+function docTable(rows, opts) {
+  const o = opts || {};
+  if (!rows.length) return '<p class="empty">Документов по этому фильтру нет</p>';
+  /* В узкой карточке показываем только то, что помещается без прокрутки:
+     остальное — в полной истории документов контрагента */
+  if (o.compact) {
+    return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+      '<th>Дата</th><th>Тип</th><th>Номер</th><th>Договор</th><th class="num">Сумма</th><th>Статус</th>' +
+      '</tr></thead><tbody>' + rows.map((x) => '<tr>' +
+        '<td class="nowrap">' + fmtDate(x.date) + '</td>' +
+        '<td class="nowrap">' + esc(DOC_TYPES[x.type] || x.type) + '</td>' +
+        '<td class="nowrap">' + esc(x.number || '—') + '</td>' +
+        '<td>' + contractTag(x.cpId, x.contractId) + '</td>' +
+        '<td class="num">' + (Number(x.amount) ? fmtMoney(x.amount) : '<span class="hint">—</span>') + '</td>' +
+        '<td>' + docTag(x.status) + '</td></tr>').join('') +
+      '</tbody></table></div>';
+  }
+  return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+    '<th>Дата</th><th>Тип</th><th>Номер</th>' + (o.hideCp ? '' : '<th>Контрагент</th>') +
+    '<th>Договор</th><th>Заказ</th><th class="num">Сумма</th><th>Статус</th><th>Комментарий</th><th></th>' +
+    '</tr></thead><tbody>' +
+    rows.map((x) => '<tr>' +
+      '<td class="nowrap">' + fmtDate(x.date) + '</td>' +
+      '<td class="nowrap">' + esc(DOC_TYPES[x.type] || x.type) + '</td>' +
+      '<td class="nowrap">' + esc(x.number || '—') + '</td>' +
+      (o.hideCp ? '' : '<td class="nowrap">' + esc(cpName(x.cpId)) + '</td>') +
+      '<td>' + contractTag(x.cpId, x.contractId) + '</td>' +
+      '<td class="nowrap">' + (x.orderId ? esc(orderLabel(x.orderId)) : '<span class="hint">—</span>') + '</td>' +
+      '<td class="num">' + (Number(x.amount) ? fmtMoney(x.amount) : '<span class="hint">—</span>') + '</td>' +
+      '<td>' + docTag(x.status) + '</td>' +
+      '<td>' + esc(x.note || '') + '</td>' +
+      '<td><button class="btn btn--sm" data-act="doc-edit" data-id="' + esc(x.id) + '" type="button">Правка</button></td>' +
+      '</tr>').join('') +
+    '</tbody><tfoot><tr><td colspan="' + (o.hideCp ? 5 : 6) + '">Итого ' + rows.length + ' ' +
+    plural(rows.length, 'документ', 'документа', 'документов') + '</td>' +
+    '<td class="num">' + fmtMoney(sum(rows, 'amount')) + '</td><td colspan="3"></td></tr></tfoot></table></div>';
+}
+
+/* ------------------------------------------------------------------ */
+/* Таблица заказов                                                    */
+/* ------------------------------------------------------------------ */
+function orderTable(rows, opts) {
+  const o = opts || {};
+  if (!rows.length) return '<p class="empty">Заказов по этому фильтру нет</p>';
+  return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+    '<th>Дата</th><th>Номер</th>' + (o.hideCp ? '' : '<th>Контрагент</th>') + '<th>Договор</th>' +
+    '<th>Статус</th><th class="num">Позиций</th><th class="num">Сумма</th><th class="num">Оплачено</th>' +
+    '<th>Готовность оплаты</th><th></th></tr></thead><tbody>' +
+    rows.map((x) => {
+      const total = orderTotal(x);
+      const paid = paidByOrder(x.id);
+      const pct = total ? Math.min(100, paid / total * 100) : 0;
+      return '<tr>' +
+        '<td class="nowrap">' + fmtDate(x.date) + '</td>' +
+        '<td class="nowrap"><b>' + esc(x.number || x.id.slice(-4)) + '</b></td>' +
+        (o.hideCp ? '' : '<td class="nowrap">' + esc(cpName(x.cpId)) + '</td>') +
+        '<td>' + contractTag(x.cpId, x.contractId) + '</td>' +
+        '<td>' + orderTag(x.status) + '</td>' +
+        '<td class="num">' + x.items.length + '</td>' +
+        '<td class="num">' + fmtMoney(total) + '</td>' +
+        '<td class="num">' + fmtMoney(paid) + '</td>' +
+        '<td><div class="prog' + (paid > total && total ? ' prog--over' : '') + '" title="' + fmtPct(pct) + '">' +
+          '<i style="width:' + pct + '%"></i></div></td>' +
+        '<td><button class="btn btn--sm" data-act="order-open" data-id="' + esc(x.id) + '" type="button">Открыть</button></td>' +
+        '</tr>';
+    }).join('') +
+    '</tbody><tfoot><tr><td colspan="' + (o.hideCp ? 5 : 6) + '">Итого ' + rows.length + ' ' +
+    plural(rows.length, 'заказ', 'заказа', 'заказов') + '</td>' +
+    '<td class="num">' + fmtMoney(rows.reduce((s, x) => s + orderTotal(x), 0)) + '</td>' +
+    '<td class="num">' + fmtMoney(rows.reduce((s, x) => s + paidByOrder(x.id), 0)) + '</td>' +
+    '<td colspan="2"></td></tr></tfoot></table></div>';
+}
+
+/* ------------------------------------------------------------------ */
+/* Вкладка контрагента                                                */
+/* ------------------------------------------------------------------ */
+function viewCp() {
+  const c = cpById(route.cpId);
+  if (!c) { route.view = 'cps'; return viewCps(); }
+
+  const subs = [['summary', 'Сводка'], ['docs', 'Документы'], ['orders', 'Заказы'],
+                ['payments', 'Оплаты'], ['schedule', 'График'], ['contracts', 'Договоры'], ['card', 'Реквизиты']];
+  const nav = '<nav class="tabs tabs--sub">' + subs.map((s) =>
+    '<button class="tab' + (route.sub === s[0] ? ' tab--active' : '') + '" data-sub="' + s[0] + '" type="button">' +
+    esc(s[1]) + '</button>').join('') + '</nav>';
+
+  const head = '<div class="card__head" style="border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-elev);margin-bottom:14px">' +
+    '<div><h1>' + esc(c.name) + '</h1><p class="topbar__subtitle">' +
+      esc(c.fullName || '') + (c.inn ? ' · ИНН ' + esc(c.inn) : '') + (c.city ? ' · ' + esc(c.city) : '') + '</p></div>' +
+    '<div class="card__tools">' +
+      '<button class="btn btn--primary" data-act="order-new" data-cp="' + esc(c.id) + '" type="button">+ Заказ</button>' +
+      '<button class="btn" data-act="pay-new" data-cp="' + esc(c.id) + '" type="button">+ Оплата</button>' +
+      '<button class="btn" data-act="doc-new" data-cp="' + esc(c.id) + '" type="button">+ Документ</button>' +
+      '<button class="btn" data-act="sched-new" data-cp="' + esc(c.id) + '" type="button">+ В график</button>' +
+    '</div></div>';
+
+  let body = '';
+  if (route.sub === 'summary') body = cpSummary(c);
+  else if (route.sub === 'docs') body = cpDocs(c);
+  else if (route.sub === 'orders') body = cpOrders(c);
+  else if (route.sub === 'payments') body = cpPayments(c);
+  else if (route.sub === 'schedule') body = cpSchedule(c);
+  else if (route.sub === 'contracts') body = cpContracts(c);
+  else body = cpCard(c);
+
+  return head + nav + body;
+}
+
+function cpSummary(c) {
+  const bal = balanceOf(c.id);
+  const pays = paymentsOf({ cpId: c.id });
+  const sched = scheduleOf({ cpId: c.id }).filter((s) => s.status !== 'paid');
+  const overdue = sched.filter((s) => schedStatus(s).key === 'overdue');
+  const orders = ordersOf({ cpId: c.id });
+  const active = orders.filter((o) => ['draft', 'agreed', 'documented'].indexOf(o.status) >= 0);
+  const lastPay = pays[0];
+
+  const kpis =
+    kpi('Выставлено счетами', fmtMoney(bal.invoiced), 'по всем договорам') +
+    kpi('Оплачено', fmtMoney(bal.paid),
+        lastPay ? 'последняя оплата ' + fmtDate(lastPay.date) : 'оплат не было', 'kpi--up') +
+    (bal.debt < 0
+      ? kpi('Аванс', fmtMoney(-bal.debt), 'оплачено сверх выставленного', 'kpi--up')
+      : kpi('Долг', fmtMoney(bal.debt), bal.debt > 0 ? 'ждём оплату' : 'расчёты закрыты',
+            bal.debt > 0 ? 'kpi--warn' : '')) +
+    kpi('Просрочено по графику', fmtMoney(sum(overdue, 'amount')),
+        overdue.length ? overdue.length + ' ' + plural(overdue.length, 'строка', 'строки', 'строк') : 'нет',
+        overdue.length ? 'kpi--down' : '') +
+    kpi('Заказы в работе', String(active.length), fmtMoney(active.reduce((s, o) => s + orderTotal(o), 0)));
+
+  /* По договорам: отдельный расчёт на каждый — у Амура основной и бартерный
+     живут своей жизнью и смешивать их в одну сумму нельзя */
+  const perContract = c.contracts.map((k) => {
+    const b = balanceOf(c.id, k.id);
+    const kind = CONTRACT_KINDS[k.kind] || CONTRACT_KINDS.other;
+    const cash = sum(db().payments.filter((p) => p.cpId === c.id && p.contractId === k.id && p.method === 'cash'));
+    const bank = sum(db().payments.filter((p) => p.cpId === c.id && p.contractId === k.id && p.method === 'bank'));
+    return '<tr><td>' + contractTag(c.id, k.id) + '</td>' +
+      '<td class="nowrap">№' + esc(k.number || '—') + ' от ' + fmtDate(k.date) + '</td>' +
+      '<td class="num">' + fmtMoney(b.invoiced) + '</td>' +
+      '<td class="num">' + fmtMoney(bank) + '</td>' +
+      '<td class="num">' + fmtMoney(cash) + '</td>' +
+      '<td class="num">' + fmtMoney(b.debt) + '</td>' +
+      '<td>' + esc(k.payTerms || '') + '</td></tr>';
+  }).join('');
+
+  const months = monthRange(db().payments.filter((p) => p.cpId === c.id).map((p) => p.date));
+  const labels = months.map(fmtMonth);
+  const byContract = c.contracts.map((k) => ({
+    label: k.name, color: (CONTRACT_KINDS[k.kind] || CONTRACT_KINDS.other).color,
+    values: byMonth(db().payments.filter((p) => p.cpId === c.id && p.contractId === k.id), 'date', months)
+  }));
+  const noContract = byMonth(db().payments.filter((p) => p.cpId === c.id && !p.contractId), 'date', months);
+  if (noContract.some((v) => v)) byContract.push({ label: 'Без договора', color: 'var(--c4)', values: noContract });
+
+  const docs = docsOf({ cpId: c.id }).slice(0, 6);
+
+  return '<div class="kpi-grid">' + kpis + '</div>' +
+    card('Расчёты по договорам',
+      c.contracts.length ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+        '<th>Договор</th><th>Реквизиты</th><th class="num">Выставлено</th><th class="num">Безнал</th>' +
+        '<th class="num">Нал</th><th class="num">Долг</th><th>Условия оплаты</th></tr></thead><tbody>' +
+        perContract + '</tbody></table></div>'
+        : '<p class="empty">Договоров нет — добавьте во вкладке «Договоры»</p>',
+      { flush: c.contracts.length > 0 }) +
+    card('Оплаты по месяцам и договорам',
+      chartSlot('ch-cp-pay', (host) => stackedBars(host, { labels: labels, series: byContract }),
+        seriesTable(labels, byContract)),
+      { tools: tableToggle('ch-cp-pay'),
+        note: 'Цвет закреплён за договором: основной — зелёный, бартерный — синий.' }) +
+    '<div class="grid2">' +
+      card('Последние документы', docs.length ? docTable(docs, { hideCp: true, compact: true }) : '<p class="empty">Документов нет</p>',
+        { flush: docs.length > 0, tools: '<button class="btn btn--sm" data-sub="docs" type="button">Вся история</button>' }) +
+      card('График платежей', sched.length ? schedTable(sched.slice(0, 8), { compact: true }) : '<p class="empty">График пуст</p>',
+        { flush: sched.length > 0, tools: '<button class="btn btn--sm" data-sub="schedule" type="button">Весь график</button>' }) +
+    '</div>';
+}
+
+function cpDocs(c) {
+  const types = [['', 'Все типы']].concat(Object.keys(DOC_TYPES).map((k) => [k, DOC_TYPES[k]]));
+  const rows = docsOf({ cpId: c.id, contractId: filters.contractId, type: filters.status, from: filters.from, to: filters.to });
+  const byType = Object.keys(DOC_TYPES).map((t, i) => ({
+    label: DOC_TYPES[t],
+    parts: [{ label: DOC_TYPES[t], color: 'var(--c' + ((i % 4) + 1) + ')',
+      value: sum(docsOf({ cpId: c.id, type: t })) }]
+  })).filter((r) => r.parts[0].value > 0);
+
+  return '<div class="filters">' +
+      '<label class="field"><span>Договор</span><select data-filter="contractId">' +
+        selectOptions(contractOptions(c.id, true), filters.contractId) + '</select></label>' +
+      '<label class="field"><span>Тип</span><select data-filter="status">' + selectOptions(types, filters.status) + '</select></label>' +
+      '<label class="field"><span>С даты</span><input type="date" data-filter="from" value="' + esc(filters.from) + '"></label>' +
+      '<label class="field"><span>По дату</span><input type="date" data-filter="to" value="' + esc(filters.to) + '"></label>' +
+      '<button class="btn" data-act="filters-reset" type="button">Сбросить</button>' +
+      '<button class="btn btn--primary" data-act="doc-new" data-cp="' + esc(c.id) + '" type="button">+ Документ</button>' +
+    '</div>' +
+    card('История документов — ' + c.name, docTable(rows, { hideCp: true }),
+      { flush: true, note: 'Счёт, спецификация, оплата, УПД и акт одной лентой: видно, что уже выпущено, а что ещё нет.' }) +
+    (byType.length ? card('Суммы по типам документов', chartSlot('ch-cp-doctype', (host) => hBars(host, byType))) : '');
+}
+
+function cpOrders(c) {
+  const rows = ordersOf({ cpId: c.id, contractId: filters.contractId, status: filters.status });
+  return '<div class="filters">' +
+      '<label class="field"><span>Договор</span><select data-filter="contractId">' +
+        selectOptions(contractOptions(c.id, true), filters.contractId) + '</select></label>' +
+      '<label class="field"><span>Статус</span><select data-filter="status">' +
+        selectOptions([['', 'Любой']].concat(Object.keys(ORDER_STATUSES).map((k) => [k, ORDER_STATUSES[k].label])), filters.status) +
+        '</select></label>' +
+      '<button class="btn" data-act="filters-reset" type="button">Сбросить</button>' +
+      '<button class="btn btn--primary" data-act="order-new" data-cp="' + esc(c.id) + '" type="button">+ Новый заказ</button>' +
+    '</div>' +
+    card('Заказы — ' + c.name, orderTable(rows, { hideCp: true }), { flush: true });
+}
+
+function cpPayments(c) {
+  const rows = paymentsOf({ cpId: c.id, contractId: filters.contractId, method: filters.method, from: filters.from, to: filters.to });
+  const months = monthRange(db().payments.filter((p) => p.cpId === c.id).map((p) => p.date));
+  const labels = months.map(fmtMonth);
+  const byMethod = Object.keys(PAY_METHODS).map((k) => ({
+    label: PAY_METHODS[k].label, color: PAY_METHODS[k].color,
+    values: byMonth(db().payments.filter((p) => p.cpId === c.id && p.method === k), 'date', months)
+  }));
+  const cash = sum(rows.filter((p) => p.method === 'cash'));
+  const bank = sum(rows.filter((p) => p.method === 'bank'));
+  const total = cash + bank;
+
+  return '<div class="filters">' +
+      '<label class="field"><span>Договор</span><select data-filter="contractId">' +
+        selectOptions(contractOptions(c.id, true), filters.contractId) + '</select></label>' +
+      '<label class="field"><span>Способ</span><select data-filter="method">' +
+        selectOptions([['', 'Нал и безнал'], ['bank', 'Безнал'], ['cash', 'Нал']], filters.method) + '</select></label>' +
+      '<label class="field"><span>С даты</span><input type="date" data-filter="from" value="' + esc(filters.from) + '"></label>' +
+      '<label class="field"><span>По дату</span><input type="date" data-filter="to" value="' + esc(filters.to) + '"></label>' +
+      '<button class="btn" data-act="filters-reset" type="button">Сбросить</button>' +
+      '<button class="btn btn--primary" data-act="pay-new" data-cp="' + esc(c.id) + '" type="button">+ Оплата</button>' +
+    '</div>' +
+    '<div class="kpi-grid">' +
+      kpi('Итого по фильтру', fmtMoney(total), rows.length + ' ' + plural(rows.length, 'оплата', 'оплаты', 'оплат')) +
+      kpi('Безнал', fmtMoney(bank), total ? fmtPct(bank / total * 100) + ' от суммы' : '') +
+      kpi('Нал', fmtMoney(cash), total ? fmtPct(cash / total * 100) + ' от суммы' : '') +
+    '</div>' +
+    card('Оплаты по месяцам — нал и безнал',
+      chartSlot('ch-cp-method', (host) => stackedBars(host, { labels: labels, series: byMethod }),
+        seriesTable(labels, byMethod)), { tools: tableToggle('ch-cp-method') }) +
+    card('Все оплаты — ' + c.name, payTable(rows, { hideCp: true }), { flush: true });
+}
+
+function cpSchedule(c) {
+  const rows = scheduleOf({ cpId: c.id, contractId: filters.contractId, method: filters.method });
+  const open = rows.filter((s) => s.status !== 'paid');
+  return '<div class="filters">' +
+      '<label class="field"><span>Договор</span><select data-filter="contractId">' +
+        selectOptions(contractOptions(c.id, true), filters.contractId) + '</select></label>' +
+      '<label class="field"><span>Способ</span><select data-filter="method">' +
+        selectOptions([['', 'Нал и безнал'], ['bank', 'Безнал'], ['cash', 'Нал']], filters.method) + '</select></label>' +
+      '<button class="btn" data-act="filters-reset" type="button">Сбросить</button>' +
+      '<button class="btn btn--primary" data-act="sched-new" data-cp="' + esc(c.id) + '" type="button">+ Плановый платёж</button>' +
+    '</div>' +
+    card('График платежей — ' + c.name, schedTable(rows), { flush: true,
+      note: 'Кнопка «Оплачено» переносит строку в фактические оплаты: сумма, договор и способ сохраняются, дата ставится сегодняшней.' }) +
+    card('К оплате вперёд', scheduleAheadChart('ch-cp-ahead', open), { tools: tableToggle('ch-cp-ahead') });
+}
+
+/* Плановые платежи по месяцам вперёд, с разбивкой на нал и безнал */
+function scheduleAheadChart(id, rows) {
+  const months = monthRange(rows.map((s) => s.dueDate));
+  const labels = months.map(fmtMonth);
+  const series = Object.keys(PAY_METHODS).map((k) => ({
+    label: PAY_METHODS[k].label, color: PAY_METHODS[k].color,
+    values: byMonth(rows.filter((s) => s.method === k), 'dueDate', months)
+  }));
+  return chartSlot(id, (host) => stackedBars(host, { labels: labels, series: series }), seriesTable(labels, series));
+}
+
+function cpContracts(c) {
+  const rows = c.contracts.map((k) => {
+    const b = balanceOf(c.id, k.id);
+    return '<tr><td>' + contractTag(c.id, k.id) + '</td>' +
+      '<td class="nowrap">' + esc(k.number || '—') + '</td>' +
+      '<td class="nowrap">' + fmtDate(k.date) + '</td>' +
+      '<td>' + esc(k.payTerms || '') + '</td>' +
+      '<td class="num">' + fmtMoney(b.invoiced) + '</td>' +
+      '<td class="num">' + fmtMoney(b.paid) + '</td>' +
+      '<td class="num">' + fmtMoney(b.debt) + '</td>' +
+      '<td>' + esc(k.note || '') + '</td>' +
+      '<td><div class="row-actions">' +
+        '<button class="btn btn--sm" data-act="contract-edit" data-cp="' + esc(c.id) + '" data-id="' + esc(k.id) + '" type="button">Правка</button>' +
+      '</div></td></tr>';
+  }).join('');
+
+  return card('Договоры — ' + c.name,
+    c.contracts.length ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+      '<th>Название</th><th>Номер</th><th>Дата</th><th>Условия оплаты</th>' +
+      '<th class="num">Выставлено</th><th class="num">Оплачено</th><th class="num">Долг</th>' +
+      '<th>Комментарий</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+      : '<p class="empty">Договоров нет</p>',
+    { flush: c.contracts.length > 0,
+      tools: '<button class="btn btn--primary btn--sm" data-act="contract-new" data-cp="' + esc(c.id) + '" type="button">+ Договор</button>',
+      note: 'У одного контрагента может быть сколько угодно договоров — оплаты, заказы и документы привязываются к конкретному.' });
+}
+
+function cpCard(c) {
+  const rows = [
+    ['Короткое название', c.name], ['Полное название', c.fullName], ['ИНН', c.inn], ['КПП', c.kpp],
+    ['Город', c.city], ['Адрес', c.address], ['Контактное лицо', c.contactPerson],
+    ['Телефон', c.phone], ['Почта', c.email], ['Ответственный', c.manager], ['Заметки', c.note]
+  ];
+  return card('Реквизиты — ' + c.name,
+    '<div class="table-wrap"><table class="tbl"><tbody>' + rows.map((r) =>
+      '<tr><th style="width:220px">' + esc(r[0]) + '</th><td>' + (r[1] ? esc(r[1]) : '<span class="hint">не заполнено</span>') + '</td></tr>'
+    ).join('') + '</tbody></table></div>',
+    { flush: true,
+      tools: '<button class="btn btn--sm" data-act="cp-edit" data-id="' + esc(c.id) + '" type="button">Правка</button>' +
+             '<button class="btn btn--sm btn--danger" data-act="cp-del" data-id="' + esc(c.id) + '" type="button">Удалить контрагента</button>' });
+}
+
+/* ------------------------------------------------------------------ */
+/* Заказы                                                             */
+/* ------------------------------------------------------------------ */
+function viewOrders() {
+  const rows = ordersOf({ cpId: filters.cpId, contractId: filters.contractId, status: filters.status,
+                          from: filters.from, to: filters.to });
+  const byStatus = Object.keys(ORDER_STATUSES).map((k, i) => {
+    const list = db().orders.filter((o) => o.status === k);
+    return { label: ORDER_STATUSES[k].label,
+      parts: [{ label: ORDER_STATUSES[k].label, color: 'var(--c' + ((i % 4) + 1) + ')',
+        value: list.reduce((s, o) => s + orderTotal(o), 0) }] };
+  }).filter((r) => r.parts[0].value > 0);
+
+  const draft = db().orders.filter((o) => o.status === 'draft');
+
+  return filtersHTML({ cp: true, contract: true, status: true, period: true,
+    extra: '<button class="btn btn--primary" data-act="order-new" type="button">+ Новый заказ</button>' }) +
+    '<div class="kpi-grid">' +
+      kpi('Заказов по фильтру', String(rows.length), fmtMoney(rows.reduce((s, o) => s + orderTotal(o), 0))) +
+      kpi('Черновики', String(draft.length), fmtMoney(draft.reduce((s, o) => s + orderTotal(o), 0)) + ' — ещё собираются') +
+      kpi('Оплачено по этим заказам', fmtMoney(rows.reduce((s, o) => s + paidByOrder(o.id), 0)),
+          'привязанные оплаты', 'kpi--up') +
+    '</div>' +
+    card('Заказы', orderTable(rows), { flush: true,
+      note: 'Заказ можно завести черновиком и дополнять позициями, пока не дошло до документов. Нажмите «Открыть», чтобы редактировать.' }) +
+    (byStatus.length ? card('Суммы заказов по статусам', chartSlot('ch-ord-status', (host) => hBars(host, byStatus))) : '');
+}
+
+/* Карточка заказа: здесь его и собирают по частям */
+function viewOrderEdit() {
+  const o = orderById(route.orderId);
+  if (!o) { route.view = 'orders'; return viewOrders(); }
+  const total = orderTotal(o);
+  const paid = paidByOrder(o.id);
+  const docs = docsOf({ orderId: o.id });
+  const pays = paymentsOf({ orderId: o.id });
+  const sched = db().schedule.filter((s) => s.orderId === o.id);
+
+  const header = card('Заказ ' + (o.number || o.id.slice(-4)),
+    '<div class="form-grid">' +
+      '<label class="field"><span>Контрагент</span><select data-order-field="cpId">' +
+        selectOptions(cpOptions(false), o.cpId) + '</select></label>' +
+      '<label class="field"><span>Договор</span><select data-order-field="contractId">' +
+        selectOptions(contractOptions(o.cpId, false), o.contractId) + '</select></label>' +
+      '<label class="field"><span>Номер заказа</span><input data-order-field="number" value="' + esc(o.number || '') + '"></label>' +
+      '<label class="field"><span>Дата заказа</span><input type="date" data-order-field="date" value="' + esc(o.date || '') + '"></label>' +
+      '<label class="field"><span>Статус</span><select data-order-field="status">' +
+        selectOptions(Object.keys(ORDER_STATUSES).map((k) => [k, ORDER_STATUSES[k].label]), o.status) + '</select></label>' +
+      '<label class="field"><span>Плановая отгрузка</span><input type="date" data-order-field="shipDate" value="' + esc(o.shipDate || '') + '"></label>' +
+      '<label class="field field--wide"><span>Комментарий</span><textarea data-order-field="note">' + esc(o.note || '') + '</textarea></label>' +
+    '</div>',
+    { tools:
+        '<button class="btn btn--sm" data-act="order-back" type="button">← К списку</button>' +
+        '<button class="btn btn--sm btn--danger" data-act="order-del" data-id="' + esc(o.id) + '" type="button">Удалить заказ</button>',
+      note: 'Любое поле сохраняется сразу, как только вы его покинули — черновик не потеряется.' });
+
+  const items = '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+    '<th style="min-width:220px">Позиция</th><th style="width:90px">Ед.</th><th style="width:110px" class="num">Кол-во</th>' +
+    '<th style="width:130px" class="num">Цена</th><th class="num">Сумма</th><th style="width:48px"></th>' +
+    '</tr></thead><tbody>' +
+    (o.items.length ? o.items.map((it) =>
+      '<tr><td><input data-item="' + esc(it.id) + '" data-field="name" value="' + esc(it.name || '') + '"></td>' +
+      '<td><input data-item="' + esc(it.id) + '" data-field="unit" value="' + esc(it.unit || '') + '"></td>' +
+      '<td><input class="num" type="number" step="any" inputmode="decimal" data-item="' + esc(it.id) + '" data-field="qty" value="' + esc(it.qty) + '"></td>' +
+      '<td><input class="num" type="number" step="any" inputmode="decimal" data-item="' + esc(it.id) + '" data-field="price" value="' + esc(it.price) + '"></td>' +
+      '<td class="num" data-sum-for="' + esc(it.id) + '">' + fmtMoney((Number(it.qty) || 0) * (Number(it.price) || 0)) + '</td>' +
+      '<td><button class="btn btn--sm btn--danger" data-act="item-del" data-id="' + esc(it.id) + '" type="button" title="Убрать позицию">✕</button></td></tr>'
+    ).join('') : '<tr><td colspan="6" class="empty">Позиций пока нет — добавьте первую</td></tr>') +
+    '</tbody><tfoot><tr><td colspan="4">Итого по заказу</td><td class="num" id="order-total">' + fmtMoney(total) + '</td><td></td></tr></tfoot></table></div>';
+
+  const actions =
+    '<div class="row-actions">' +
+      '<button class="btn btn--primary" data-act="item-add" type="button">+ Позиция</button>' +
+      '<button class="btn" data-act="order-make-doc" data-type="invoice" type="button">Выписать счёт</button>' +
+      '<button class="btn" data-act="order-make-doc" data-type="spec" type="button">Сформировать спецификацию</button>' +
+      '<button class="btn" data-act="order-make-sched" type="button">Внести в график оплат</button>' +
+      '<button class="btn" data-act="order-make-pay" type="button">Отметить оплату</button>' +
+    '</div>';
+
+  return header +
+    '<div class="kpi-grid" id="order-kpis">' + orderKpisHTML(o) + '</div>' +
+    card('Позиции заказа', items + '<div style="margin-top:12px">' + actions + '</div>',
+      { note: 'Счёт и спецификация создаются на текущую сумму заказа и сразу попадают в историю документов контрагента.' }) +
+    '<div class="grid2">' +
+      card('Документы по заказу', docs.length ? docTable(docs, { hideCp: true }) : '<p class="empty">Документов по заказу нет</p>',
+        { flush: docs.length > 0 }) +
+      card('Оплаты по заказу',
+        (pays.length ? payTable(pays, { hideCp: true }) : '<p class="empty">Оплат по заказу нет</p>') +
+        (sched.length ? '<div style="padding:12px"><h3 style="margin-bottom:8px">В графике</h3></div>' + schedTable(sched, { compact: true }) : ''),
+        { flush: true }) +
+    '</div>';
+}
+
+/* Плитки заказа считаются от текущих позиций, поэтому вынесены отдельно:
+   их же разметка подставляется при живой правке строк. */
+function orderKpisHTML(o) {
+  const total = orderTotal(o);
+  const paid = paidByOrder(o.id);
+  const pct = total ? Math.min(100, paid / total * 100) : 0;
+  return kpi('Сумма заказа', fmtMoney(total), o.items.length + ' ' + plural(o.items.length, 'позиция', 'позиции', 'позиций')) +
+    kpi('Оплачено', fmtMoney(paid), total ? fmtPct(pct) + ' от суммы' : '', 'kpi--up') +
+    kpi('Остаток', fmtMoney(Math.max(0, total - paid)), total - paid > 0 ? 'ждём оплату' : 'закрыт',
+        total - paid > 0 ? 'kpi--warn' : '') +
+    kpi('Статус', ORDER_STATUSES[o.status] ? esc(ORDER_STATUSES[o.status].label) : '—',
+        o.shipDate ? 'отгрузка ' + fmtDate(o.shipDate) : 'дата отгрузки не задана');
+}
+
+/* Правка позиции обновляет только то, что от неё зависит: суммы строк,
+   итог и плитки. Пересобирать таблицу на каждом нажатии клавиши нельзя —
+   поле вместе с курсором исчезло бы из-под рук, а щелчок по кнопке,
+   сделанный сразу после ввода, не дошёл бы до неё. */
+function updateOrderLive() {
+  const o = orderById(route.orderId);
+  if (!o) return;
+  o.items.forEach((it) => {
+    const cell = document.querySelector('[data-sum-for="' + it.id + '"]');
+    if (cell) cell.textContent = fmtMoney((Number(it.qty) || 0) * (Number(it.price) || 0));
+  });
+  const totalCell = document.getElementById('order-total');
+  if (totalCell) totalCell.textContent = fmtMoney(orderTotal(o));
+  const kpis = document.getElementById('order-kpis');
+  if (kpis) kpis.innerHTML = orderKpisHTML(o);
+}
+
+/* ------------------------------------------------------------------ */
+/* Оплаты (общий раздел)                                              */
+/* ------------------------------------------------------------------ */
+function viewPayments() {
+  const rows = paymentsOf({ cpId: filters.cpId, contractId: filters.contractId, method: filters.method,
+                            from: filters.from, to: filters.to });
+  const sched = scheduleOf({ cpId: filters.cpId, contractId: filters.contractId, method: filters.method });
+  const open = sched.filter((s) => s.status !== 'paid');
+  const overdue = open.filter((s) => schedStatus(s).key === 'overdue');
+  const cash = sum(rows.filter((p) => p.method === 'cash'));
+  const bank = sum(rows.filter((p) => p.method === 'bank'));
+  const total = cash + bank;
+
+  const months = monthRange(db().payments.map((p) => p.date).concat(db().schedule.map((s) => s.dueDate)));
+  const labels = months.map(fmtMonth);
+
+  /* Разрез по договорам: у каждого договора свой цвет, закреплённый за ним */
+  const contracts = allContracts().filter((x) => !filters.cpId || x.cp.id === filters.cpId);
+  /* Цвет по типу договора годится, только когда выбран один контрагент:
+     иначе два разных «Основных» встали бы в стопку одним цветом и их
+     было бы не различить. Без фильтра раздаём цвета по порядку. */
+  const byContract = contracts.map((x, i) => ({
+    label: (filters.cpId ? '' : x.cp.name + ' · ') + x.contract.name,
+    color: filters.cpId
+      ? (CONTRACT_KINDS[x.contract.kind] || CONTRACT_KINDS.other).color
+      : 'var(--c' + ((i % 4) + 1) + ')',
+    values: byMonth(db().payments.filter((p) => p.contractId === x.contract.id), 'date', months)
+  })).filter((s) => s.values.some((v) => v));
+  const noContract = byMonth(db().payments.filter((p) => !p.contractId &&
+    (!filters.cpId || p.cpId === filters.cpId)), 'date', months);
+  if (noContract.some((v) => v)) byContract.push({ label: 'Без договора', color: 'var(--c4)', values: noContract });
+
+  /* План против факта: одна шкала, обе серии в рублях */
+  const planVsFact = [
+    { label: 'Факт — оплачено', color: 'var(--c1)',
+      values: byMonth(db().payments.filter((p) => !filters.cpId || p.cpId === filters.cpId), 'date', months) },
+    { label: 'План по графику', color: 'var(--c2)', dashed: true,
+      values: byMonth(db().schedule.filter((s) => !filters.cpId || s.cpId === filters.cpId), 'dueDate', months) }
+  ];
+
+  const methodSeries = Object.keys(PAY_METHODS).map((k) => ({
+    label: PAY_METHODS[k].label, color: PAY_METHODS[k].color,
+    values: byMonth(db().payments.filter((p) => p.method === k && (!filters.cpId || p.cpId === filters.cpId)), 'date', months)
+  }));
+
+  return filtersHTML({ cp: true, contract: true, method: true, period: true,
+    extra: '<button class="btn btn--primary" data-act="pay-new" type="button">+ Оплата</button>' +
+           '<button class="btn" data-act="sched-new" type="button">+ В график</button>' }) +
+    '<div class="kpi-grid">' +
+      kpi('Поступило по фильтру', fmtMoney(total), rows.length + ' ' + plural(rows.length, 'оплата', 'оплаты', 'оплат')) +
+      kpi('Безнал', fmtMoney(bank), total ? fmtPct(bank / total * 100) + ' от суммы' : '') +
+      kpi('Нал', fmtMoney(cash), total ? fmtPct(cash / total * 100) + ' от суммы' : '') +
+      kpi('Ждём по графику', fmtMoney(sum(open, 'amount')),
+          open.length + ' ' + plural(open.length, 'строка', 'строки', 'строк')) +
+      kpi('Просрочено', fmtMoney(sum(overdue, 'amount')),
+          overdue.length ? overdue.length + ' ' + plural(overdue.length, 'строка', 'строки', 'строк') : 'нет',
+          overdue.length ? 'kpi--down' : '') +
+    '</div>' +
+    card('График платежей',
+      schedTable(sched),
+      { flush: true, note: 'Строка графика живёт отдельно от факта: пока не нажали «Оплачено», это план. ' +
+        'Срок подсвечивается сам — просрочка красным, ближайшая неделя жёлтым.' }) +
+    card('План и факт по месяцам',
+      chartSlot('ch-pay-pf', (host) => lineChart(host, { labels: labels, series: planVsFact }),
+        seriesTable(labels, planVsFact)),
+      { tools: tableToggle('ch-pay-pf'),
+        note: 'Сплошная линия — фактические оплаты, пунктир — график. Обе в рублях на одной шкале.' }) +
+    '<div class="grid2">' +
+      card('Оплаты по договорам',
+        chartSlot('ch-pay-contract', (host) => stackedBars(host, { labels: labels, series: byContract }),
+          seriesTable(labels, byContract)), { tools: tableToggle('ch-pay-contract') }) +
+      card('Нал и безнал по месяцам',
+        chartSlot('ch-pay-method', (host) => stackedBars(host, { labels: labels, series: methodSeries }),
+          seriesTable(labels, methodSeries)), { tools: tableToggle('ch-pay-method') }) +
+    '</div>' +
+    card('Фактические оплаты', payTable(rows), { flush: true });
+}
+
+/* ------------------------------------------------------------------ */
+/* Документы (общий раздел)                                           */
+/* ------------------------------------------------------------------ */
+function viewDocs() {
+  const types = [['', 'Все типы']].concat(Object.keys(DOC_TYPES).map((k) => [k, DOC_TYPES[k]]));
+  const rows = docsOf({ cpId: filters.cpId, contractId: filters.contractId, type: filters.status,
+                        from: filters.from, to: filters.to });
+  return '<div class="filters">' +
+      '<label class="field"><span>Контрагент</span><select data-filter="cpId">' + selectOptions(cpOptions(true), filters.cpId) + '</select></label>' +
+      '<label class="field"><span>Договор</span><select data-filter="contractId">' + selectOptions(contractOptions(filters.cpId, true), filters.contractId) + '</select></label>' +
+      '<label class="field"><span>Тип</span><select data-filter="status">' + selectOptions(types, filters.status) + '</select></label>' +
+      '<label class="field"><span>С даты</span><input type="date" data-filter="from" value="' + esc(filters.from) + '"></label>' +
+      '<label class="field"><span>По дату</span><input type="date" data-filter="to" value="' + esc(filters.to) + '"></label>' +
+      '<button class="btn" data-act="filters-reset" type="button">Сбросить</button>' +
+      '<button class="btn btn--primary" data-act="doc-new" type="button">+ Документ</button>' +
+    '</div>' +
+    card('Все документы', docTable(rows), { flush: true });
+}
+
+/* ------------------------------------------------------------------ */
+/* Аналитика                                                          */
+/* ------------------------------------------------------------------ */
+function viewAnalytics() {
+  const d = db();
+  const orders = ordersOf({ cpId: filters.cpId, contractId: filters.contractId, from: filters.from, to: filters.to });
+  const pays = paymentsOf({ cpId: filters.cpId, contractId: filters.contractId, from: filters.from, to: filters.to });
+  const ordersTotal = orders.reduce((s, o) => s + orderTotal(o), 0);
+  const paysTotal = sum(pays);
+  const avg = orders.length ? ordersTotal / orders.length : 0;
+  const cash = sum(pays.filter((p) => p.method === 'cash'));
+
+  const months = monthRange(d.payments.map((p) => p.date).concat(d.orders.map((o) => o.date)));
+  const labels = months.map(fmtMonth);
+
+  /* Оплаты по контрагентам: цвет закреплён за контрагентом по его месту
+     в справочнике, а не по текущей сортировке */
+  const cpSeries = d.counterparties.map((c, i) => ({
+    label: c.name, color: 'var(--c' + ((i % 4) + 1) + ')',
+    values: byMonth(d.payments.filter((p) => p.cpId === c.id), 'date', months)
+  })).filter((s) => s.values.some((v) => v));
+
+  const orderSeries = [{
+    label: 'Сумма заказов', color: 'var(--c2)',
+    values: byMonth(d.orders, 'date', months, orderTotal)
+  }];
+
+  /* Топ позиций по сумме — по всем заказам выборки */
+  const itemAgg = {};
+  orders.forEach((o) => o.items.forEach((it) => {
+    const key = (it.name || '—').trim();
+    if (!itemAgg[key]) itemAgg[key] = { amount: 0, qty: 0, unit: it.unit || '' };
+    itemAgg[key].amount += (Number(it.qty) || 0) * (Number(it.price) || 0);
+    itemAgg[key].qty += Number(it.qty) || 0;
+  }));
+  const topItems = Object.keys(itemAgg).map((k) => ({ name: k, data: itemAgg[k] }))
+    .sort((a, b) => b.data.amount - a.data.amount).slice(0, 10);
+  const itemRows = topItems.map((x) => ({
+    label: x.name, parts: [{ label: 'Сумма', color: 'var(--c1)', value: x.data.amount }]
+  }));
+
+  /* Итоги по контрагентам — та же выборка числами */
+  const cpTotals = d.counterparties.map((c) => {
+    const b = balanceOf(c.id);
+    const own = d.payments.filter((p) => p.cpId === c.id);
+    const ords = d.orders.filter((o) => o.cpId === c.id);
+    return { c: c, b: b,
+      bank: sum(own.filter((p) => p.method === 'bank')),
+      cash: sum(own.filter((p) => p.method === 'cash')),
+      orders: ords.length, ordersSum: ords.reduce((s, o) => s + orderTotal(o), 0) };
+  }).sort((a, b) => b.b.paid - a.b.paid);
+
+  const totalsTable = '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+    '<th>Контрагент</th><th class="num">Договоров</th><th class="num">Заказов</th><th class="num">Сумма заказов</th>' +
+    '<th class="num">Выставлено</th><th class="num">Безнал</th><th class="num">Нал</th>' +
+    '<th class="num">Оплачено</th><th class="num">Долг</th></tr></thead><tbody>' +
+    cpTotals.map((r) => '<tr>' +
+      '<td class="nowrap"><button class="btn btn--sm btn--ghost" data-nav="cp" data-cp="' + esc(r.c.id) + '" type="button">' + esc(r.c.name) + '</button></td>' +
+      '<td class="num">' + r.c.contracts.length + '</td>' +
+      '<td class="num">' + r.orders + '</td>' +
+      '<td class="num">' + fmtMoney(r.ordersSum) + '</td>' +
+      '<td class="num">' + fmtMoney(r.b.invoiced) + '</td>' +
+      '<td class="num">' + fmtMoney(r.bank) + '</td>' +
+      '<td class="num">' + fmtMoney(r.cash) + '</td>' +
+      '<td class="num">' + fmtMoney(r.b.paid) + '</td>' +
+      '<td class="num">' + fmtMoney(r.b.debt) + '</td></tr>').join('') +
+    '</tbody><tfoot><tr><td>Итого</td>' +
+      '<td class="num">' + cpTotals.reduce((s, r) => s + r.c.contracts.length, 0) + '</td>' +
+      '<td class="num">' + cpTotals.reduce((s, r) => s + r.orders, 0) + '</td>' +
+      '<td class="num">' + fmtMoney(cpTotals.reduce((s, r) => s + r.ordersSum, 0)) + '</td>' +
+      '<td class="num">' + fmtMoney(cpTotals.reduce((s, r) => s + r.b.invoiced, 0)) + '</td>' +
+      '<td class="num">' + fmtMoney(cpTotals.reduce((s, r) => s + r.bank, 0)) + '</td>' +
+      '<td class="num">' + fmtMoney(cpTotals.reduce((s, r) => s + r.cash, 0)) + '</td>' +
+      '<td class="num">' + fmtMoney(cpTotals.reduce((s, r) => s + r.b.paid, 0)) + '</td>' +
+      '<td class="num">' + fmtMoney(cpTotals.reduce((s, r) => s + r.b.debt, 0)) + '</td>' +
+    '</tr></tfoot></table></div>';
+
+  return filtersHTML({ cp: true, contract: true, period: true }) +
+    '<div class="kpi-grid">' +
+      kpi('Сумма заказов', fmtMoney(ordersTotal), orders.length + ' ' + plural(orders.length, 'заказ', 'заказа', 'заказов')) +
+      kpi('Поступления', fmtMoney(paysTotal), ordersTotal ? fmtPct(paysTotal / ordersTotal * 100) + ' от суммы заказов' : '', 'kpi--up') +
+      kpi('Средний заказ', fmtMoney(avg), 'по выборке') +
+      kpi('Доля нала', paysTotal ? fmtPct(cash / paysTotal * 100) : '—', fmtMoney(cash) + ' налом') +
+      kpi('Контрагентов', String(d.counterparties.length),
+          allContracts().length + ' ' + plural(allContracts().length, 'договор', 'договора', 'договоров')) +
+    '</div>' +
+    card('Итоги по контрагентам', totalsTable, { flush: true,
+      note: 'Нажмите на название, чтобы открыть вкладку контрагента.' }) +
+    card('Поступления по месяцам и контрагентам',
+      chartSlot('ch-an-cp', (host) => stackedBars(host, { labels: labels, series: cpSeries }),
+        seriesTable(labels, cpSeries)), { tools: tableToggle('ch-an-cp') }) +
+    '<div class="grid2">' +
+      card('Сумма заказов по месяцам',
+        chartSlot('ch-an-ord', (host) => stackedBars(host, { labels: labels, series: orderSeries }),
+          seriesTable(labels, orderSeries)), { tools: tableToggle('ch-an-ord') }) +
+      card('Топ позиций по сумме', chartSlot('ch-an-items', (host) => hBars(host, itemRows)),
+        { note: 'Считается по позициям заказов выборки.' }) +
+    '</div>';
+}
+
+/* ------------------------------------------------------------------ */
+/* Контрагенты: список и добавление                                   */
+/* ------------------------------------------------------------------ */
+function viewCps() {
+  const rows = db().counterparties.map((c, i) => {
+    const b = balanceOf(c.id);
+    const ords = db().orders.filter((o) => o.cpId === c.id);
+    return '<tr>' +
+      '<td class="nowrap"><i class="tab__dot" style="background:var(--c' + ((i % 4) + 1) + ')"></i><b>' + esc(c.name) + '</b></td>' +
+      '<td>' + esc(c.fullName || '') + '</td>' +
+      '<td class="nowrap">' + esc(c.inn || '—') + '</td>' +
+      '<td>' + (c.contracts.length ? c.contracts.map((k) => contractTag(c.id, k.id)).join(' ') : '<span class="hint">нет</span>') + '</td>' +
+      '<td class="nowrap">' + esc(c.contactPerson || '—') + (c.phone ? '<br><span class="hint">' + esc(c.phone) + '</span>' : '') + '</td>' +
+      '<td class="num">' + ords.length + '</td>' +
+      '<td class="num">' + fmtMoney(b.paid) + '</td>' +
+      '<td class="num">' + fmtMoney(b.debt) + '</td>' +
+      '<td><div class="row-actions">' +
+        '<button class="btn btn--sm btn--primary" data-nav="cp" data-cp="' + esc(c.id) + '" type="button">Открыть</button>' +
+        '<button class="btn btn--sm" data-act="cp-edit" data-id="' + esc(c.id) + '" type="button">Правка</button>' +
+      '</div></td></tr>';
+  }).join('');
+
+  return card('Контрагенты',
+    db().counterparties.length ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+      '<th>Название</th><th>Полное название</th><th>ИНН</th><th>Договоры</th><th>Контакт</th>' +
+      '<th class="num">Заказов</th><th class="num">Оплачено</th><th class="num">Долг</th><th></th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>'
+      : '<p class="empty">Пока никого нет — добавьте первого контрагента</p>',
+    { flush: db().counterparties.length > 0,
+      tools: '<button class="btn btn--primary btn--sm" data-act="cp-new" type="button">+ Новый контрагент</button>',
+      note: 'У каждого контрагента появляется своя вкладка в верхнем ряду — вся его история в одном месте.' });
+}
+
+/* ------------------------------------------------------------------ */
+/* Данные: выгрузка, загрузка, сброс                                  */
+/* ------------------------------------------------------------------ */
+function viewData() {
+  const d = db();
+  const counts = [
+    ['Контрагенты', d.counterparties.length],
+    ['Договоры', allContracts().length],
+    ['Заказы', d.orders.length],
+    ['Документы', d.documents.length],
+    ['Оплаты', d.payments.length],
+    ['Строки графика', d.schedule.length]
+  ];
+  return card('Что сейчас в базе',
+    '<div class="kpi-grid" style="margin:0">' + counts.map((c) => kpi(c[0], String(c[1]), '')).join('') + '</div>') +
+    card('Перенос и резервная копия',
+      '<p class="hint" style="margin-top:0">Данные лежат в этом браузере на этом устройстве. Чтобы перенести их на другой ' +
+      'компьютер или телефон — выгрузите файл и загрузите его там. Файл обычный JSON, его можно хранить в облаке как резервную копию.</p>' +
+      '<div class="row-actions" style="margin-top:12px">' +
+        '<button class="btn btn--primary" data-act="export" type="button">Выгрузить в файл</button>' +
+        '<button class="btn" data-act="import-replace" type="button">Загрузить из файла (заменить)</button>' +
+        '<button class="btn" data-act="import-merge" type="button">Загрузить и добавить к текущим</button>' +
+        '<button class="btn" data-act="print" type="button">Печать текущего экрана</button>' +
+      '</div>' +
+      '<input type="file" id="import-file" accept=".json,application/json" hidden>') +
+    card('Очистка',
+      '<p class="hint" style="margin-top:0">Перед очисткой выгрузите файл — восстановить удалённое иначе не получится.</p>' +
+      '<div class="row-actions" style="margin-top:12px">' +
+        '<button class="btn btn--danger" data-act="reset-empty" type="button">Очистить всё и начать с нуля</button>' +
+        '<button class="btn btn--danger" data-act="reset-sample" type="button">Вернуть демонстрационный пример</button>' +
+      '</div>');
+}
+
+/* ------------------------------------------------------------------ */
+/* Формы создания и правки                                            */
+/* ------------------------------------------------------------------ */
+function formCounterparty(cpId) {
+  const c = cpId ? cpById(cpId) : null;
+  openForm({
+    title: c ? 'Контрагент: ' + c.name : 'Новый контрагент',
+    fields: [
+      { name: 'name', label: 'Короткое название', value: c && c.name, required: true, hint: 'Так он будет назван на вкладке' },
+      { name: 'fullName', label: 'Полное название', value: c && c.fullName },
+      { name: 'inn', label: 'ИНН', value: c && c.inn },
+      { name: 'kpp', label: 'КПП', value: c && c.kpp },
+      { name: 'city', label: 'Город', value: c && c.city },
+      { name: 'address', label: 'Адрес', value: c && c.address, wide: true },
+      { name: 'contactPerson', label: 'Контактное лицо', value: c && c.contactPerson },
+      { name: 'phone', label: 'Телефон', value: c && c.phone },
+      { name: 'email', label: 'Почта', value: c && c.email },
+      { name: 'manager', label: 'Ответственный', value: c && c.manager },
+      { name: 'note', label: 'Заметки', type: 'textarea', value: c && c.note, wide: true }
+    ],
+    onSave: (v) => {
+      if (c) { upsert('counterparties', Object.assign({}, v, { id: c.id })); }
+      else {
+        const item = Object.assign({}, v, { contracts: [] });
+        upsert('counterparties', item, 'cp');
+        /* Новому контрагенту сразу открываем его вкладку: следующий шаг —
+           завести договор */
+        route = { view: 'cp', cpId: item.id, sub: 'contracts', orderId: '' };
+      }
+    },
+    onDelete: c ? () => { removeCounterparty(c.id); route = { view: 'cps', cpId: '', sub: '', orderId: '' }; } : null
+  });
+}
+
+function formContract(cpId, contractId) {
+  const c = cpById(cpId);
+  if (!c) return;
+  const k = contractId ? contractById(cpId, contractId) : null;
+  openForm({
+    title: (k ? 'Договор: ' + k.name : 'Новый договор') + ' — ' + c.name,
+    fields: [
+      { name: 'name', label: 'Название', value: k ? k.name : 'Основной', required: true,
+        hint: 'Например: Основной, Бартерный' },
+      { name: 'kind', label: 'Тип', type: 'select', value: k ? k.kind : 'main',
+        options: Object.keys(CONTRACT_KINDS).map((x) => [x, CONTRACT_KINDS[x].label]) },
+      { name: 'number', label: 'Номер', value: k && k.number },
+      { name: 'date', label: 'Дата', type: 'date', value: k ? k.date : today() },
+      { name: 'payTerms', label: 'Условия оплаты', value: k && k.payTerms, wide: true },
+      { name: 'note', label: 'Комментарий', type: 'textarea', value: k && k.note, wide: true }
+    ],
+    onSave: (v) => {
+      if (k) Object.assign(k, v);
+      else c.contracts.push(Object.assign({ id: uid('k') }, v));
+      save();
+    },
+    onDelete: k ? () => removeContract(cpId, contractId) : null
+  });
+}
+
+function formPayment(payId, preset) {
+  const p = payId ? db().payments.find((x) => x.id === payId) : null;
+  const cpId = p ? p.cpId : (preset && preset.cpId) || filters.cpId || (db().counterparties[0] || {}).id || '';
+  openForm({
+    title: p ? 'Оплата от ' + fmtDate(p.date) : 'Новая оплата',
+    fields: [
+      { name: 'date', label: 'Дата оплаты', type: 'date', value: p ? p.date : today(), required: true },
+      { name: 'amount', label: 'Сумма, ₽', type: 'number', value: p ? p.amount : (preset && preset.amount) || '', required: true },
+      { name: 'cpId', label: 'Контрагент', type: 'select', value: cpId, options: cpOptions(false), required: true },
+      { name: 'contractId', label: 'Договор', type: 'select',
+        value: p ? p.contractId : (preset && preset.contractId) || '', options: contractOptions(cpId, false) },
+      { name: 'orderId', label: 'Заказ', type: 'select',
+        value: p ? p.orderId : (preset && preset.orderId) || '', options: orderOptions(cpId) },
+      { name: 'method', label: 'Способ', type: 'select', value: p ? p.method : (preset && preset.method) || 'bank',
+        options: Object.keys(PAY_METHODS).map((k) => [k, PAY_METHODS[k].label]) },
+      { name: 'note', label: 'Комментарий', type: 'textarea', value: p && p.note, wide: true }
+    ],
+    validate: (v) => (Number(v.amount) > 0 ? null : 'Сумма оплаты должна быть больше нуля'),
+    onSave: (v) => { upsert('payments', p ? Object.assign({}, v, { id: p.id }) : v, 'pay'); },
+    onDelete: p ? () => remove('payments', p.id) : null
+  });
+}
+
+function formSchedule(schedId, preset) {
+  const s = schedId ? db().schedule.find((x) => x.id === schedId) : null;
+  const cpId = s ? s.cpId : (preset && preset.cpId) || filters.cpId || (db().counterparties[0] || {}).id || '';
+  openForm({
+    title: s ? 'Плановый платёж на ' + fmtDate(s.dueDate) : 'Новый плановый платёж',
+    fields: [
+      { name: 'dueDate', label: 'Срок оплаты', type: 'date', value: s ? s.dueDate : (preset && preset.dueDate) || today(), required: true },
+      { name: 'amount', label: 'Сумма, ₽', type: 'number', value: s ? s.amount : (preset && preset.amount) || '', required: true },
+      { name: 'cpId', label: 'Контрагент', type: 'select', value: cpId, options: cpOptions(false), required: true },
+      { name: 'contractId', label: 'Договор', type: 'select',
+        value: s ? s.contractId : (preset && preset.contractId) || '', options: contractOptions(cpId, false) },
+      { name: 'orderId', label: 'Заказ', type: 'select',
+        value: s ? s.orderId : (preset && preset.orderId) || '', options: orderOptions(cpId) },
+      { name: 'method', label: 'Способ', type: 'select', value: s ? s.method : (preset && preset.method) || 'bank',
+        options: Object.keys(PAY_METHODS).map((k) => [k, PAY_METHODS[k].label]) },
+      { name: 'status', label: 'Состояние', type: 'select', value: s ? s.status : 'plan',
+        options: [['plan', 'План'], ['paid', 'Закрыто']] },
+      { name: 'note', label: 'Комментарий', type: 'textarea', value: s && s.note, wide: true }
+    ],
+    validate: (v) => (Number(v.amount) > 0 ? null : 'Сумма должна быть больше нуля'),
+    onSave: (v) => { upsert('schedule', s ? Object.assign({}, v, { id: s.id }) : v, 'sch'); },
+    onDelete: s ? () => remove('schedule', s.id) : null
+  });
+}
+
+function formDocument(docId, preset) {
+  const x = docId ? db().documents.find((y) => y.id === docId) : null;
+  const cpId = x ? x.cpId : (preset && preset.cpId) || filters.cpId || (db().counterparties[0] || {}).id || '';
+  openForm({
+    title: x ? (DOC_TYPES[x.type] || 'Документ') + ' №' + (x.number || '') : 'Новый документ',
+    fields: [
+      { name: 'type', label: 'Тип', type: 'select', value: x ? x.type : (preset && preset.type) || 'invoice',
+        options: Object.keys(DOC_TYPES).map((k) => [k, DOC_TYPES[k]]), required: true },
+      { name: 'number', label: 'Номер', value: x ? x.number : (preset && preset.number) || '' },
+      { name: 'date', label: 'Дата', type: 'date', value: x ? x.date : today(), required: true },
+      { name: 'amount', label: 'Сумма, ₽', type: 'number', value: x ? x.amount : (preset && preset.amount) || '' },
+      { name: 'cpId', label: 'Контрагент', type: 'select', value: cpId, options: cpOptions(false), required: true },
+      { name: 'contractId', label: 'Договор', type: 'select',
+        value: x ? x.contractId : (preset && preset.contractId) || '', options: contractOptions(cpId, false) },
+      { name: 'orderId', label: 'Заказ', type: 'select',
+        value: x ? x.orderId : (preset && preset.orderId) || '', options: orderOptions(cpId) },
+      { name: 'status', label: 'Статус', type: 'select', value: x ? x.status : 'draft',
+        options: Object.keys(DOC_STATUSES).map((k) => [k, DOC_STATUSES[k].label]) },
+      { name: 'note', label: 'Комментарий', type: 'textarea', value: x && x.note, wide: true }
+    ],
+    onSave: (v) => { upsert('documents', x ? Object.assign({}, v, { id: x.id }) : v, 'doc'); },
+    onDelete: x ? () => remove('documents', x.id) : null
+  });
+}
+
+/* Новый заказ создаётся пустым черновиком и сразу открывается на правку:
+   позиции добавляются постепенно, ничего заполнять заранее не нужно. */
+function newOrder(cpId) {
+  const cps = db().counterparties;
+  if (!cps.length) { alert('Сначала добавьте контрагента во вкладке «Контрагенты».'); return; }
+  const cp = cpById(cpId) || cpById(filters.cpId) || cps[0];
+  const nums = db().orders.map((o) => parseInt(o.number, 10)).filter((n) => !isNaN(n));
+  const next = nums.length ? Math.max.apply(null, nums) + 1 : 101;
+  const order = {
+    cpId: cp.id,
+    contractId: (cp.contracts[0] || {}).id || '',
+    number: String(next), date: today(), status: 'draft', shipDate: '', note: '', items: []
+  };
+  upsert('orders', order, 'ord');
+  route = { view: 'order', cpId: '', sub: '', orderId: order.id };
+  render();
+}
+
+/* ------------------------------------------------------------------ */
+/* Отрисовка                                                          */
+/* ------------------------------------------------------------------ */
+function render() {
+  chartJobs = [];
+  const nav = document.getElementById('tabs');
+  const main = document.getElementById('main');
+
+  let html = '';
+  if (route.view === 'dash') html = viewDash();
+  else if (route.view === 'cp') html = viewCp();
+  else if (route.view === 'cps') html = viewCps();
+  else if (route.view === 'orders') html = viewOrders();
+  else if (route.view === 'order') html = viewOrderEdit();
+  else if (route.view === 'payments') html = viewPayments();
+  else if (route.view === 'docs') html = viewDocs();
+  else if (route.view === 'analytics') html = viewAnalytics();
+  else if (route.view === 'data') html = viewData();
+  else html = viewDash();
+
+  nav.innerHTML = navHTML();
+  main.innerHTML = html;
+
+  chartJobs.forEach((job) => {
+    const host = document.getElementById(job.id);
+    if (host) job.draw(host);
+  });
+}
+
+/* Перерисовка графиков при смене темы: цвета берутся из CSS-переменных,
+   но подложка сегментов и подписи заданы в момент рисования */
+function rerenderCharts() { render(); }
+
+/* ------------------------------------------------------------------ */
+/* Действия                                                           */
+/* ------------------------------------------------------------------ */
+function downloadFile(name, text, type) {
+  const blob = new Blob([text], { type: type || 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function handleAction(act, node) {
+  const id = node.getAttribute('data-id') || '';
+  const cp = node.getAttribute('data-cp') || '';
+
+  switch (act) {
+    case 'filters-reset':
+      filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '' };
+      render(); return;
+
+    case 'toggle-table': {
+      const t = document.getElementById(node.getAttribute('data-target'));
+      if (t) { t.hidden = !t.hidden; node.textContent = t.hidden ? 'Таблицей' : 'Скрыть таблицу'; }
+      return;
+    }
+
+    case 'go-payments': go('payments'); return;
+
+    /* Контрагенты и договоры */
+    case 'cp-new': formCounterparty(''); return;
+    case 'cp-edit': formCounterparty(id); return;
+    case 'cp-del':
+      if (confirm('Удалить контрагента вместе со всеми его заказами, документами и оплатами?\n\nДействие нельзя отменить.')) {
+        removeCounterparty(id); go('cps');
+      }
+      return;
+    case 'contract-new': formContract(cp, ''); return;
+    case 'contract-edit': formContract(cp, id); return;
+
+    /* Оплаты, график, документы */
+    case 'pay-new': formPayment('', { cpId: cp }); return;
+    case 'pay-edit': formPayment(id); return;
+    case 'sched-new': formSchedule('', { cpId: cp }); return;
+    case 'sched-edit': formSchedule(id); return;
+    case 'sched-pay': {
+      const s = db().schedule.find((x) => x.id === id);
+      if (!s) return;
+      /* Плановую строку закрываем и сразу заводим факт: сумму и способ
+         можно поправить в форме до сохранения */
+      formPayment('', { cpId: s.cpId, contractId: s.contractId, orderId: s.orderId,
+                        amount: s.amount, method: s.method });
+      s.status = 'paid';
+      save();
+      return;
+    }
+    case 'doc-new': formDocument('', { cpId: cp }); return;
+    case 'doc-edit': formDocument(id); return;
+
+    /* Заказы */
+    case 'order-new': newOrder(cp); return;
+    case 'order-open': route = { view: 'order', cpId: '', sub: '', orderId: id }; render(); return;
+    case 'order-back': go('orders'); return;
+    case 'order-del':
+      if (confirm('Удалить заказ? Документы и оплаты, привязанные к нему, останутся, но потеряют ссылку.')) {
+        db().documents.forEach((d) => { if (d.orderId === id) d.orderId = ''; });
+        db().payments.forEach((p) => { if (p.orderId === id) p.orderId = ''; });
+        db().schedule.forEach((s) => { if (s.orderId === id) s.orderId = ''; });
+        remove('orders', id);
+        go('orders');
+      }
+      return;
+
+    case 'item-add': {
+      const o = orderById(route.orderId);
+      if (!o) return;
+      o.items.push({ id: uid('it'), name: '', unit: 'шт', qty: 1, price: 0 });
+      save(); render();
+      /* Курсор — в название новой позиции, чтобы сразу печатать */
+      const inputs = document.querySelectorAll('[data-field="name"]');
+      if (inputs.length) inputs[inputs.length - 1].focus();
+      return;
+    }
+    case 'item-del': {
+      const o = orderById(route.orderId);
+      if (!o) return;
+      o.items = o.items.filter((it) => it.id !== id);
+      save(); render(); return;
+    }
+
+    case 'order-make-doc': {
+      const o = orderById(route.orderId);
+      if (!o) return;
+      const type = node.getAttribute('data-type');
+      const total = orderTotal(o);
+      if (!total) { alert('Сначала добавьте позиции: сумма заказа пока нулевая.'); return; }
+      formDocument('', { cpId: o.cpId, contractId: o.contractId, orderId: o.id, type: type,
+                         amount: total, number: (type === 'spec' ? 'С-' : '') + (o.number || '') });
+      /* Выписали счёт — заказ перестаёт быть черновиком */
+      if (o.status === 'draft' || o.status === 'agreed') { o.status = 'documented'; save(); }
+      return;
+    }
+    case 'order-make-sched': {
+      const o = orderById(route.orderId);
+      if (!o) return;
+      const left = Math.max(0, orderTotal(o) - paidByOrder(o.id));
+      formSchedule('', { cpId: o.cpId, contractId: o.contractId, orderId: o.id, amount: left || orderTotal(o) });
+      return;
+    }
+    case 'order-make-pay': {
+      const o = orderById(route.orderId);
+      if (!o) return;
+      const left = Math.max(0, orderTotal(o) - paidByOrder(o.id));
+      formPayment('', { cpId: o.cpId, contractId: o.contractId, orderId: o.id, amount: left || orderTotal(o) });
+      return;
+    }
+
+    /* Данные */
+    case 'export': {
+      const stamp = today();
+      downloadFile('платформа-продаж-' + stamp + '.json', exportJSON());
+      return;
+    }
+    case 'import-replace':
+    case 'import-merge': {
+      const input = document.getElementById('import-file');
+      input.onchange = () => {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            importJSON(String(reader.result), act === 'import-merge' ? 'merge' : 'replace');
+            alert('Данные загружены.');
+            go('dash');
+          } catch (e) {
+            alert('Не удалось прочитать файл: ' + e.message);
+          }
+          input.value = '';
+        };
+        reader.readAsText(file);
+      };
+      input.click();
+      return;
+    }
+    case 'print': window.print(); return;
+    case 'reset-empty':
+      if (confirm('Удалить все данные без возможности восстановления?')) { resetAll(false); go('dash'); }
+      return;
+    case 'reset-sample':
+      if (confirm('Заменить текущие данные демонстрационным примером?')) { resetAll(true); go('dash'); }
+      return;
+
+    default: return;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Запуск                                                             */
+/* ------------------------------------------------------------------ */
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  try { localStorage.setItem('sales-platform-theme', theme); } catch (e) { /* не критично */ }
+  const btn = document.getElementById('btn-theme');
+  if (btn) {
+    btn.textContent = theme === 'light' ? '🌙' : '☀';
+    btn.title = theme === 'light' ? 'Тёмная тема' : 'Светлая тема';
+  }
+}
+
+function init() {
+  load();
+
+  let theme = 'dark';
+  try { theme = localStorage.getItem('sales-platform-theme') || 'dark'; } catch (e) { theme = 'dark'; }
+  applyTheme(theme);
+
+  document.getElementById('btn-theme').addEventListener('click', () => {
+    const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    applyTheme(next);
+    rerenderCharts();
+  });
+
+  /* Один обработчик на всю страницу: разметка пересобирается целиком,
+     поэтому навешивать слушатели на каждую кнопку бессмысленно */
+  document.addEventListener('click', (e) => {
+    const nav = e.target.closest('[data-nav]');
+    if (nav) {
+      const view = nav.getAttribute('data-nav');
+      const cpId = nav.getAttribute('data-cp') || '';
+      if (view === 'cp') { route = { view: 'cp', cpId: cpId, sub: 'summary', orderId: '' }; window.scrollTo({ top: 0 }); render(); }
+      else go(view);
+      return;
+    }
+    const sub = e.target.closest('[data-sub]');
+    if (sub && route.view === 'cp') { route.sub = sub.getAttribute('data-sub'); render(); return; }
+
+    const act = e.target.closest('[data-act]');
+    if (act) { handleAction(act.getAttribute('data-act'), act); }
+  });
+
+  /* Фильтры: смена контрагента сбрасывает выбранный договор, иначе
+     остался бы фильтр по договору чужого контрагента */
+  document.addEventListener('change', (e) => {
+    const f = e.target.closest('[data-filter]');
+    if (f) {
+      const key = f.getAttribute('data-filter');
+      filters[key] = f.value;
+      if (key === 'cpId') filters.contractId = '';
+      render();
+      return;
+    }
+
+    /* Списки заказа меняют состав зависимых полей, поэтому здесь нужна
+       полная перерисовка: выбор в select виден сразу, терять ввод нечему. */
+    const of = e.target.closest('[data-order-field]');
+    if (of && of.tagName === 'SELECT') {
+      const o = orderById(route.orderId);
+      if (!o) return;
+      const key = of.getAttribute('data-order-field');
+      o[key] = of.value;
+      if (key === 'cpId') o.contractId = '';
+      save(); render();
+    }
+  });
+
+  /* Текстовые поля сохраняются по каждому нажатию клавиши: событие change
+     у них приходит только при потере фокуса, и правка отставала бы на одно
+     действие, а иногда и пропадала совсем. */
+  document.addEventListener('input', (e) => {
+    const of = e.target.closest('[data-order-field]');
+    if (of && of.tagName !== 'SELECT') {
+      const o = orderById(route.orderId);
+      if (!o) return;
+      o[of.getAttribute('data-order-field')] = of.value;
+      save();
+      updateOrderLive();
+      return;
+    }
+
+    const item = e.target.closest('[data-item]');
+    if (item) {
+      const o = orderById(route.orderId);
+      if (!o) return;
+      const it = o.items.find((x) => x.id === item.getAttribute('data-item'));
+      if (!it) return;
+      const field = item.getAttribute('data-field');
+      it[field] = (field === 'qty' || field === 'price')
+        ? Number(String(item.value).replace(',', '.')) || 0
+        : item.value;
+      save();
+      updateOrderLive();
+    }
+  });
+
+  /* Ширина графиков считается от контейнера, поэтому при изменении окна
+     их надо перерисовать. Ждём, пока размер перестанет меняться. */
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      chartJobs.forEach((job) => {
+        const host = document.getElementById(job.id);
+        if (host) job.draw(host);
+      });
+    }, 180);
+  });
+
+  render();
+}
+
+document.addEventListener('DOMContentLoaded', init);
