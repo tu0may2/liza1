@@ -74,7 +74,11 @@ function load() {
     ['counterparties', 'orders', 'documents', 'payments', 'schedule'].forEach((k) => {
       if (!Array.isArray(state[k])) state[k] = [];
     });
-    state.counterparties.forEach((c) => { if (!Array.isArray(c.contracts)) c.contracts = []; });
+    state.counterparties.forEach((c) => {
+      if (!Array.isArray(c.contracts)) c.contracts = [];
+      if (!Array.isArray(c.priceItems)) c.priceItems = [];
+      if (!Array.isArray(c.priceFiles)) c.priceFiles = [];
+    });
     state.orders.forEach((o) => { if (!Array.isArray(o.items)) o.items = []; });
     state.documents.forEach((d2) => { if (!Array.isArray(d2.files)) d2.files = []; });
   } catch (e) {
@@ -166,6 +170,8 @@ function removeCounterparty(cpId) {
   /* Вложения удаляемых документов тоже вычищаем */
   const ids = [];
   d.documents.filter((x) => x.cpId === cpId).forEach((x) => docFiles(x).forEach((f) => ids.push(f.id)));
+  const gone = d.counterparties.find((c) => c.id === cpId);
+  if (gone) priceFiles(gone).forEach((f) => ids.push(f.id));
   ids.forEach((id) => { try { fileDel(id); } catch (e) { /* хранилище могло не открыться */ } });
   d.counterparties = d.counterparties.filter((c) => c.id !== cpId);
   ['orders', 'documents', 'payments', 'schedule'].forEach((k) => {
@@ -195,6 +201,20 @@ function docFiles(doc) {
   return doc.files;
 }
 
+/* Прайс-лист контрагента: позиции, заведённые руками, и присланные PDF.
+   Лежат у самого контрагента — цены у каждого свои, общего прайса нет. */
+function priceItems(c) {
+  if (!c) return [];
+  if (!Array.isArray(c.priceItems)) c.priceItems = [];
+  return c.priceItems;
+}
+
+function priceFiles(c) {
+  if (!c) return [];
+  if (!Array.isArray(c.priceFiles)) c.priceFiles = [];
+  return c.priceFiles;
+}
+
 /* Сводка по вложениям документа: сколько файлов и подписан ли он.
    Документ считается подписанным, если хотя бы один скан подписан
    обеими сторонами — именно такой экземпляр имеет силу. */
@@ -209,6 +229,9 @@ function docSignState(doc) {
 function allFileIds() {
   const out = [];
   db().documents.forEach((d2) => docFiles(d2).forEach((f) => out.push(f.id)));
+  /* Прайсы тоже лежат в хранилище файлов — без них чистка сочла бы их
+     забытыми и удалила */
+  db().counterparties.forEach((c) => priceFiles(c).forEach((f) => out.push(f.id)));
   return out;
 }
 
@@ -236,6 +259,7 @@ function exportWithFiles() {
   const snapshot = JSON.parse(JSON.stringify(db()));
   const metas = [];
   snapshot.documents.forEach((d2) => (d2.files || []).forEach((f) => metas.push(f)));
+  snapshot.counterparties.forEach((c) => (c.priceFiles || []).forEach((f) => metas.push(f)));
   return Promise.all(metas.map((f) =>
     fileGet(f.id).then((blob) => (blob ? blobToBase64(blob).then((b64) => [f.id, { type: f.type, b64: b64 }]) : null))
       .catch(() => null)
@@ -270,6 +294,10 @@ function importJSON(text, mode) {
     state = Object.assign(blankState(), parsed);
   }
   state.documents.forEach((d2) => { if (!Array.isArray(d2.files)) d2.files = []; });
+  state.counterparties.forEach((c) => {
+    if (!Array.isArray(c.priceItems)) c.priceItems = [];
+    if (!Array.isArray(c.priceFiles)) c.priceFiles = [];
+  });
   save();
   return Promise.all(restore).then(() => Object.keys(blobs).length);
 }
@@ -297,6 +325,13 @@ function seedState() {
     city: 'Хабаровск', address: 'г. Хабаровск, ул. Ленина, 18, оф. 404',
     contactPerson: 'Игнатьев Сергей', phone: '+7 (914) 200-10-10', email: 'sales@amur.example',
     manager: 'Лиза', note: 'Работаем по двум договорам: основной денежный и бартерный.',
+    priceFiles: [],
+    priceItems: [
+      { id: 'pi-a1', article: 'МР-25', name: 'Мука рыбная, мешок 25 кг', unit: 'т', price: 71000, note: 'Цена действует с начала квартала.' },
+      { id: 'pi-a2', article: 'СЛ-2', name: 'Соль пищевая помол №2', unit: 'т', price: 9800, note: '' },
+      { id: 'pi-a3', article: 'ТР-50', name: 'Тара полипропиленовая, 50 л', unit: 'шт', price: 215, note: 'От 1000 шт.' },
+      { id: 'pi-a4', article: 'СТ-Г', name: 'Стропы грузовые', unit: 'шт', price: 1450, note: '' }
+    ],
     contracts: [
       { id: 'k-amur-main', kind: 'main', name: 'Основной', number: 'А-' + y + '/14',
         date: y + '-01-15', payTerms: 'Отсрочка 30 календарных дней', note: 'Оплата по счёту, безнал.' },
@@ -310,6 +345,11 @@ function seedState() {
     city: 'Южно-Сахалинск', address: 'г. Южно-Сахалинск, пр. Мира, 112',
     contactPerson: 'Ким Ольга', phone: '+7 (962) 300-44-55', email: 'zakaz@sakh-sharks.example',
     manager: 'Лиза', note: 'Один договор, оплата преимущественно безналом.',
+    priceFiles: [],
+    priceItems: [
+      { id: 'pi-s1', article: 'ЯЩ-20', name: 'Ящик рыбный 20 кг', unit: 'шт', price: 165, note: '' },
+      { id: 'pi-s2', article: 'ЛД-Т', name: 'Лёд технический', unit: 'т', price: 4200, note: 'Доставка по городу включена.' }
+    ],
     contracts: [
       { id: 'k-sharks-main', kind: 'main', name: 'Основной', number: 'СА-' + y + '/07',
         date: y + '-03-11', payTerms: 'Предоплата 50%, остаток в течение 14 дней', note: '' }

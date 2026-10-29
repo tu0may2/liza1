@@ -892,7 +892,8 @@ function viewCp() {
   if (!c) { route.view = 'cps'; return viewCps(); }
 
   const subs = [['summary', 'Сводка'], ['docs', 'Документы'], ['orders', 'Заказы'],
-                ['payments', 'Оплаты'], ['schedule', 'График'], ['contracts', 'Договоры'], ['card', 'Реквизиты']];
+                ['payments', 'Оплаты'], ['schedule', 'График'], ['price', 'Прайс-лист'],
+                ['contracts', 'Договоры'], ['card', 'Реквизиты']];
   const nav = '<nav class="tabs tabs--sub">' + subs.map((s) =>
     '<button class="tab' + (route.sub === s[0] ? ' tab--active' : '') + '" data-sub="' + s[0] + '" type="button">' +
     esc(s[1]) + '</button>').join('') + '</nav>';
@@ -905,6 +906,7 @@ function viewCp() {
       '<button class="btn" data-act="pay-new" data-cp="' + esc(c.id) + '" type="button">+ Оплата</button>' +
       '<button class="btn" data-act="doc-new" data-cp="' + esc(c.id) + '" type="button">+ Документ</button>' +
       '<button class="btn" data-act="sched-new" data-cp="' + esc(c.id) + '" type="button">+ В график</button>' +
+      '<button class="btn" data-sub="price" type="button">Прайс-лист</button>' +
     '</div></div>';
 
   let body = '';
@@ -913,6 +915,7 @@ function viewCp() {
   else if (route.sub === 'orders') body = cpOrders(c);
   else if (route.sub === 'payments') body = cpPayments(c);
   else if (route.sub === 'schedule') body = cpSchedule(c);
+  else if (route.sub === 'price') body = cpPrice(c);
   else if (route.sub === 'contracts') body = cpContracts(c);
   else body = cpCard(c);
 
@@ -1145,6 +1148,73 @@ function cpCard(c) {
              '<button class="btn btn--sm btn--danger" data-act="cp-del" data-id="' + esc(c.id) + '" type="button">Удалить контрагента</button>' });
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Прайс-лист контрагента                                             */
+/* ------------------------------------------------------------------ */
+/* Две части, потому что в работе нужны обе: присланный PDF — это то, на
+   что ссылаются в переписке, а позиции руками — то, из чего собирается
+   заказ. Одно другое не заменяет. */
+function cpPrice(c) {
+  const items = priceItems(c);
+  const files = priceFiles(c);
+
+  const table = items.length
+    ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+      '<th style="width:120px">Артикул</th><th style="min-width:220px">Позиция</th>' +
+      '<th style="width:90px">Ед.</th><th style="width:140px" class="num">Цена</th>' +
+      '<th>Комментарий</th><th style="width:48px"></th></tr></thead><tbody>' +
+      items.map((it) =>
+        '<tr>' +
+        '<td><input data-price="' + esc(it.id) + '" data-field="article" value="' + esc(it.article || '') + '"></td>' +
+        '<td><input data-price="' + esc(it.id) + '" data-field="name" value="' + esc(it.name || '') + '"></td>' +
+        '<td><input data-price="' + esc(it.id) + '" data-field="unit" value="' + esc(it.unit || '') + '"></td>' +
+        '<td><input class="num" type="number" step="any" inputmode="decimal" data-price="' + esc(it.id) +
+          '" data-field="price" value="' + esc(it.price) + '"></td>' +
+        '<td><input data-price="' + esc(it.id) + '" data-field="note" value="' + esc(it.note || '') + '"></td>' +
+        '<td><button class="btn btn--sm btn--danger" data-act="price-del" data-cp="' + esc(c.id) +
+          '" data-id="' + esc(it.id) + '" type="button" title="Убрать позицию">✕</button></td>' +
+        '</tr>').join('') +
+      '</tbody></table></div>'
+    : emptyBox('Позиций пока нет — добавьте первую или возьмите их из присланного прайса');
+
+  const filesHTML = files.length
+    ? '<div class="files">' + files.map((f) =>
+        '<div class="file">' +
+          '<span class="file__icon">' + (/^image\//.test(f.type || '') ? 'IMG' : 'PDF') + '</span>' +
+          '<span class="file__body">' +
+            '<span class="file__name" title="' + esc(f.name) + '">' + esc(f.name) + '</span>' +
+            '<span class="file__meta">' + fmtSize(f.size) + ' · загружен ' + fmtDate(f.addedAt) +
+              (f.validFrom ? ' · действует с ' + fmtDate(f.validFrom) : '') + '</span>' +
+          '</span>' +
+          '<label class="field" style="min-width:170px"><span>Действует с</span>' +
+            '<input type="date" data-price-file-date="' + esc(f.id) + '" data-cp="' + esc(c.id) +
+            '" value="' + esc(f.validFrom || '') + '"></label>' +
+          '<span class="file__actions">' +
+            '<button class="btn btn--sm" data-act="price-file-open" data-cp="' + esc(c.id) + '" data-id="' + esc(f.id) + '" type="button">Открыть</button>' +
+            '<button class="btn btn--sm" data-act="price-file-save" data-cp="' + esc(c.id) + '" data-id="' + esc(f.id) + '" type="button">Скачать</button>' +
+            '<button class="btn btn--sm btn--danger" data-act="price-file-del" data-cp="' + esc(c.id) + '" data-id="' + esc(f.id) + '" type="button">Удалить</button>' +
+          '</span>' +
+        '</div>').join('') + '</div>'
+    : '';
+
+  return card('Прайс-лист — ' + c.name, table + '<div style="margin-top:12px" class="row-actions">' +
+      '<button class="btn btn--primary" data-act="price-add" data-cp="' + esc(c.id) + '" type="button">+ Позиция</button>' +
+    '</div>',
+    { note: 'Эти позиции подставляются в заказ: в карточке заказа есть кнопка «Из прайса». ' +
+      'Цена и единица подтянутся, останется ввести количество.' }) +
+    card('Присланный прайс в PDF',
+      '<div class="drop" id="price-drop" data-cp="' + esc(c.id) + '" tabindex="0" role="button">' +
+        '<span class="drop__cat">' + catSVG() + '</span>' +
+        '<b>Перетащите сюда PDF или нажмите, чтобы выбрать</b>' +
+        'Можно хранить несколько версий — у каждой своя дата начала действия. ' +
+        'Принимаются PDF и фотографии, до ' + MAX_FILE_MB + '\u00a0МБ каждая.' +
+      '</div>' +
+      '<input type="file" id="price-file-input" accept="application/pdf,image/*" multiple hidden>' +
+      (filesHTML ? '<div style="margin-top:16px">' + filesHTML + '</div>' : ''),
+      { note: 'Файл — то, на что ссылаются в переписке. Позиции выше нужны отдельно: из них собирается заказ.' });
+}
+
 /* ------------------------------------------------------------------ */
 /* Заказы                                                             */
 /* ------------------------------------------------------------------ */
@@ -1218,6 +1288,7 @@ function viewOrderEdit() {
   const actions =
     '<div class="row-actions">' +
       '<button class="btn btn--primary" data-act="item-add" type="button">+ Позиция</button>' +
+      '<button class="btn" data-act="order-price-pick" type="button">Из прайса</button>' +
       '<button class="btn" data-act="order-make-doc" data-type="invoice" type="button">Выписать счёт</button>' +
       '<button class="btn" data-act="order-make-doc" data-type="spec" type="button">Сформировать спецификацию</button>' +
       '<button class="btn" data-act="order-make-sched" type="button">Внести в график оплат</button>' +
@@ -1785,6 +1856,126 @@ function newOrder(cpId) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Загрузка прайса и подстановка позиций в заказ                      */
+/* ------------------------------------------------------------------ */
+function addPriceFiles(cpId, fileList) {
+  const c = cpById(cpId);
+  const files = Array.prototype.slice.call(fileList || []);
+  if (!c || !files.length) return;
+  const tooBig = files.filter((f) => f.size > MAX_FILE_MB * 1048576);
+  if (tooBig.length) {
+    alert('Слишком большие файлы (больше ' + MAX_FILE_MB + ' МБ):\n' +
+          tooBig.map((f) => f.name).join('\n'));
+  }
+  const ok = files.filter((f) => f.size <= MAX_FILE_MB * 1048576);
+  Promise.all(ok.map((f) => {
+    const id = uid('file');
+    return filePut(id, f).then(() => {
+      priceFiles(c).push({
+        id: id, name: f.name, size: f.size, type: f.type || 'application/pdf',
+        addedAt: today(), validFrom: '', note: ''
+      });
+    });
+  })).then(() => { save(); render(); })
+    .catch((e) => alert('Не удалось сохранить файл: ' + e.message));
+}
+
+function bindPriceDrop() {
+  const drop = document.getElementById('price-drop');
+  const input = document.getElementById('price-file-input');
+  if (!drop || !input) return;
+  const cpId = drop.getAttribute('data-cp');
+
+  drop.addEventListener('click', () => input.click());
+  drop.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
+  });
+  input.addEventListener('change', () => { addPriceFiles(cpId, input.files); input.value = ''; });
+
+  /* Гасим поведение браузера: иначе он откроет файл поверх страницы */
+  ['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => {
+    e.preventDefault(); drop.classList.add('drop--over');
+  }));
+  ['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => {
+    e.preventDefault(); drop.classList.remove('drop--over');
+  }));
+  drop.addEventListener('drop', (e) => addPriceFiles(cpId, e.dataTransfer && e.dataTransfer.files));
+}
+
+/* Набор заказа из прайса: отмечаем позиции и сразу задаём количество.
+   Цена подставляется из прайса, но остаётся редактируемой в заказе —
+   договорная скидка не должна править сам прайс. */
+function openPricePicker(order) {
+  const c = cpById(order.cpId);
+  const list = c ? priceItems(c) : [];
+  if (!list.length) {
+    alert('У контрагента «' + (c ? c.name : '') + '» прайс пока пуст.\n\n' +
+          'Заведите позиции во вкладке контрагента → «Прайс-лист».');
+    return;
+  }
+
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML =
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="Позиции из прайса">' +
+      '<header class="modal__head"><h2>Из прайса — ' + esc(c.name) + '</h2>' +
+        '<button class="btn btn--sm" data-close type="button">Закрыть</button></header>' +
+      '<div class="modal__body">' +
+        '<p class="hint" style="margin-top:0">Отметьте позиции и укажите количество. ' +
+        'Цена подставится из прайса, в заказе её можно поправить.</p>' +
+        '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+          '<th style="width:42px"></th><th>Артикул</th><th>Позиция</th><th>Ед.</th>' +
+          '<th class="num">Цена</th><th style="width:120px" class="num">Кол-во</th>' +
+        '</tr></thead><tbody>' +
+        list.map((it) => '<tr>' +
+          '<td><input type="checkbox" data-pick="' + esc(it.id) + '" style="width:auto"></td>' +
+          '<td class="nowrap">' + esc(it.article || '—') + '</td>' +
+          '<td>' + esc(it.name || '') + (it.note ? '<div class="hint">' + esc(it.note) + '</div>' : '') + '</td>' +
+          '<td class="nowrap">' + esc(it.unit || '') + '</td>' +
+          '<td class="num">' + fmtMoney(it.price) + '</td>' +
+          '<td><input class="num" type="number" step="any" min="0" inputmode="decimal" ' +
+            'data-qty="' + esc(it.id) + '" value="1"></td>' +
+        '</tr>').join('') +
+        '</tbody></table></div>' +
+      '</div>' +
+      '<footer class="modal__foot">' +
+        '<button class="btn" data-close type="button">Отмена</button>' +
+        '<button class="btn btn--primary" data-add type="button">Добавить в заказ</button>' +
+      '</footer>' +
+    '</div>';
+
+  const close = () => { document.removeEventListener('keydown', onKey); back.remove(); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+
+  back.addEventListener('click', (e) => {
+    if (e.target === back || e.target.closest('[data-close]')) { close(); return; }
+    if (!e.target.closest('[data-add]')) return;
+
+    const picked = Array.prototype.slice.call(back.querySelectorAll('[data-pick]:checked'));
+    if (!picked.length) { alert('Отметьте хотя бы одну позицию.'); return; }
+    picked.forEach((box) => {
+      const id = box.getAttribute('data-pick');
+      const src = list.find((x) => x.id === id);
+      if (!src) return;
+      const qtyInput = back.querySelector('[data-qty="' + id + '"]');
+      const qty = Number(String(qtyInput ? qtyInput.value : '1').replace(',', '.')) || 1;
+      /* Если такая позиция в заказе уже есть по той же цене — добавляем
+         количество к ней, а не плодим одинаковые строки */
+      const same = order.items.find((x) => x.name === src.name && Number(x.price) === Number(src.price));
+      if (same) same.qty = (Number(same.qty) || 0) + qty;
+      else order.items.push({ id: uid('it'), name: src.name, unit: src.unit || 'шт',
+                              qty: qty, price: Number(src.price) || 0 });
+    });
+    save();
+    close();
+    render();
+  });
+
+  document.body.appendChild(back);
+}
+
+/* ------------------------------------------------------------------ */
 /* Отрисовка                                                          */
 /* ------------------------------------------------------------------ */
 function render() {
@@ -1811,6 +2002,10 @@ function render() {
     const host = document.getElementById(job.id);
     if (host) job.draw(host);
   });
+
+  /* Зона загрузки прайса живёт прямо на странице, а не в окне, и
+     пересобирается вместе с ней — обработчики вешаются после отрисовки */
+  bindPriceDrop();
 
   /* Вес хранилища файлов читается из IndexedDB, то есть не сразу —
      подставляем, когда ответ придёт, и только если экран ещё тот же */
@@ -1885,6 +2080,49 @@ function handleAction(act, node) {
     case 'doc-new': formDocument('', { cpId: cp }); return;
     case 'doc-edit': formDocument(id); return;
     case 'doc-files': openFilesModal(id); return;
+
+    /* Прайс-лист */
+    case 'price-add': {
+      const c = cpById(cp);
+      if (!c) return;
+      priceItems(c).push({ id: uid('pi'), article: '', name: '', unit: 'шт', price: 0, note: '' });
+      save(); render();
+      const inputs = document.querySelectorAll('[data-price][data-field="name"]');
+      if (inputs.length) inputs[inputs.length - 1].focus();
+      return;
+    }
+    case 'price-del': {
+      const c = cpById(cp);
+      if (!c) return;
+      c.priceItems = priceItems(c).filter((x) => x.id !== id);
+      save(); render(); return;
+    }
+    case 'price-file-open':
+    case 'price-file-save': {
+      const c = cpById(cp);
+      const meta = c && priceFiles(c).find((x) => x.id === id);
+      fileGet(id).then((blob) => {
+        if (!blob) { alert('Файл не найден в хранилище — возможно, он был удалён.'); return; }
+        openBlob(blob, meta && meta.name, act === 'price-file-save');
+      }).catch((e) => alert('Не удалось прочитать файл: ' + e.message));
+      return;
+    }
+    case 'price-file-del': {
+      const c = cpById(cp);
+      if (!c) return;
+      const f = priceFiles(c).find((x) => x.id === id);
+      if (!confirm('Удалить файл «' + (f ? f.name : '') + '»?')) return;
+      fileDel(id).catch(() => null).then(() => {
+        c.priceFiles = priceFiles(c).filter((x) => x.id !== id);
+        save(); render();
+      });
+      return;
+    }
+    case 'order-price-pick': {
+      const o = orderById(route.orderId);
+      if (o) openPricePicker(o);
+      return;
+    }
 
     /* Заказы */
     case 'order-new': newOrder(cp); return;
@@ -2135,6 +2373,14 @@ function init() {
 
     /* Списки заказа меняют состав зависимых полей, поэтому здесь нужна
        полная перерисовка: выбор в select виден сразу, терять ввод нечему. */
+    const pf = e.target.closest('[data-price-file-date]');
+    if (pf) {
+      const c = cpById(pf.getAttribute('data-cp'));
+      const f = c && priceFiles(c).find((x) => x.id === pf.getAttribute('data-price-file-date'));
+      if (f) { f.validFrom = pf.value; save(); }
+      return;
+    }
+
     const of = e.target.closest('[data-order-field]');
     if (of && of.tagName === 'SELECT') {
       const o = orderById(route.orderId);
@@ -2157,6 +2403,20 @@ function init() {
       o[of.getAttribute('data-order-field')] = of.value;
       save();
       updateOrderLive();
+      return;
+    }
+
+    /* Позиции прайса сохраняются так же, как позиции заказа: по вводу,
+       а не по потере фокуса — иначе правка отставала бы на одно действие */
+    const pi = e.target.closest('[data-price]');
+    if (pi) {
+      const c = cpById(route.cpId);
+      if (!c) return;
+      const row = priceItems(c).find((x) => x.id === pi.getAttribute('data-price'));
+      if (!row) return;
+      const field = pi.getAttribute('data-field');
+      row[field] = field === 'price' ? (Number(String(pi.value).replace(',', '.')) || 0) : pi.value;
+      save();
       return;
     }
 
