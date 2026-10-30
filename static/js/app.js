@@ -398,9 +398,13 @@ function signTag(kind) {
 function clipHTML(doc) {
   const st = docSignState(doc);
   if (!st.count) return '<span class="hint">—</span>';
-  const cls = st.key === 'both' ? ' paperclip--signed' : '';
-  return '<span class="paperclip' + cls + '" title="' + esc(st.label) + '">📎 ' + st.count +
-    ' · ' + esc(st.label) + '</span>';
+  const signed = st.key === 'both' || (doc.type === 'invoice' && st.key === 'one');
+  /* У счёта второй стороны нет, поэтому и подпись у него одна */
+  const label = doc.type === 'invoice'
+    ? (signed ? 'подписан' : st.key === 'none' ? 'не подписан' : st.label)
+    : st.label;
+  return '<span class="paperclip' + (signed ? ' paperclip--signed' : '') +
+    '" title="' + esc(label) + '">📎 ' + st.count + ' · ' + esc(label) + '</span>';
 }
 
 /* Короткая скрепка для любой записи — без разбора подписей */
@@ -427,7 +431,7 @@ function fileRowHTML(meta, opts) {
       (o.signing
         ? '<label class="field" style="min-width:210px"><span>Подписание</span>' +
             '<select data-file-kind="' + esc(meta.id) + '">' +
-              selectOptions(Object.keys(SIGN_STATES).map((k) => [k, SIGN_STATES[k].label]), meta.kind || '') +
+              selectOptions(signOptionsFor(meta), meta.kind || '') +
             '</select></label>'
         : '') +
       '<span class="file__actions">' +
@@ -1835,12 +1839,34 @@ const DOC_GROUPS = [
   { key: 'other', label: 'Прочее', match: () => true }
 ];
 
-const SIGN_GROUPS = [
-  { key: 'both', label: 'Подписано с обеих сторон' },
-  { key: 'one', label: 'Подписано с одной стороны' },
-  { key: 'none', label: 'Не подписано' },
-  { key: '', label: 'Без отметки' }
+/* У договоров, спецификаций, УПД и актов две стороны, поэтому состояний
+   четыре. У счёта второй стороны нет: его подписывает поставщик, и
+   различать «одну сторону» бессмысленно — только подписан или нет. */
+const SIGN_GROUPS_FULL = [
+  { key: 'both', label: 'Подписано с обеих сторон', match: (k) => k === 'both' },
+  { key: 'one', label: 'Подписано с одной стороны', match: (k) => k === 'one' },
+  { key: 'none', label: 'Не подписано', match: (k) => k === 'none' },
+  { key: 'empty', label: 'Без отметки', match: (k) => !k }
 ];
+
+const SIGN_GROUPS_INVOICE = [
+  { key: 'signed', label: 'Подписан', match: (k) => k === 'both' || k === 'one' },
+  { key: 'unsigned', label: 'Не подписан', match: (k) => k === 'none' || !k }
+];
+
+function signGroupsFor(groupKey) {
+  return groupKey === 'invoice' ? SIGN_GROUPS_INVOICE : SIGN_GROUPS_FULL;
+}
+
+/* Что предлагать в самой строке файла. Для счёта — две отметки, для
+   остальных — полный набор. */
+function signOptionsFor(meta) {
+  const simple = meta.ownerKind === 'doc' && docTypeOfFile(meta) === 'invoice';
+  const keys = simple ? ['', 'none', 'both'] : ['', 'none', 'one', 'both'];
+  return keys.map((k) => [k, simple
+    ? (k === 'both' ? 'Подписан' : k === 'none' ? 'Не подписан' : 'Не отмечено')
+    : SIGN_STATES[k].label]);
+}
 
 function docTypeOfFile(f) {
   if (f.ownerKind !== 'doc') return '';
@@ -1873,7 +1899,7 @@ function cpLibrary(c) {
     const found = all.filter((f) => f.name.toLowerCase().indexOf(needle) >= 0);
     searchCard = card('Найдено по запросу «' + (filters.search || '').trim() + '»',
       found.length
-        ? '<div class="files">' + found.map((f) => fileRowHTML(f, { showOwner: true })).join('') + '</div>'
+        ? '<div class="files">' + found.map((f) => fileRowHTML(f, { showOwner: true, signing: ownerWantsSigning(f.ownerKind) })).join('') + '</div>'
         : emptyBox('По этому запросу ничего нет'),
       { tools: '<button class="btn btn--sm" data-act="search-clear" type="button">Очистить поиск</button>',
         note: found.length ? 'Показано ' + found.length + ' ' +
@@ -1913,14 +1939,11 @@ function cpLibrary(c) {
   const inGroup = all.filter((f) => groupOfFile(f) === filters.libGroup);
 
   /* Шаг 2 — состояние подписания */
-  const signCounts = {};
-  inGroup.forEach((f) => {
-    const k = f.kind || '';
-    signCounts[k] = (signCounts[k] || 0) + 1;
-  });
-  const signTiles = SIGN_GROUPS.map((sg) =>
-    tileHTML('data-lib-sign', sg.key || 'empty', sg.label, signCounts[sg.key] || 0,
-      filters.libSign === (sg.key || 'empty'))).join('') +
+  const signGroups = signGroupsFor(filters.libGroup);
+  const signTiles = signGroups.map((sg) =>
+    tileHTML('data-lib-sign', sg.key, sg.label,
+      inGroup.filter((f) => sg.match(f.kind || '')).length,
+      filters.libSign === sg.key)).join('') +
     tileHTML('data-lib-sign', 'all', 'Все в разделе', inGroup.length, filters.libSign === 'all');
 
   const crumbs = '<div class="crumbs">' +
@@ -1929,7 +1952,7 @@ function cpLibrary(c) {
     (filters.libSign
       ? '<span class="crumbs__sep">/</span><b>' +
         esc(filters.libSign === 'all' ? 'Все в разделе'
-          : (SIGN_GROUPS.find((x) => (x.key || 'empty') === filters.libSign) || {}).label || '') + '</b>'
+          : (signGroups.find((x) => x.key === filters.libSign) || {}).label || '') + '</b>'
       : '') +
     '</div>';
 
@@ -1942,16 +1965,17 @@ function cpLibrary(c) {
   }
 
   /* Шаг 3 — список */
-  const rows = filters.libSign === 'all'
+  const chosen = signGroups.find((x) => x.key === filters.libSign);
+  const rows = (filters.libSign === 'all' || !chosen)
     ? inGroup
-    : inGroup.filter((f) => (f.kind || '') === (filters.libSign === 'empty' ? '' : filters.libSign));
-  const signName = filters.libSign === 'all' ? 'все состояния'
-    : ((SIGN_GROUPS.find((x) => (x.key || 'empty') === filters.libSign) || {}).label || '').toLowerCase();
+    : inGroup.filter((f) => chosen.match(f.kind || ''));
+  const signName = filters.libSign === 'all' || !chosen
+    ? 'все состояния' : chosen.label.toLowerCase();
 
   return searchBox + searchCard + upload + crumbs +
     card(groupName + ' · ' + signName,
       rows.length
-        ? '<div class="files">' + rows.map((f) => fileRowHTML(f, { showOwner: true })).join('') + '</div>'
+        ? '<div class="files">' + rows.map((f) => fileRowHTML(f, { showOwner: true, signing: ownerWantsSigning(f.ownerKind) })).join('') + '</div>'
         : emptyBox('В этом разделе с таким состоянием подписания файлов нет'),
       { tools: '<button class="btn btn--sm" data-act="lib-back-sign" type="button">← К состояниям</button>',
         note: rows.length
