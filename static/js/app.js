@@ -381,7 +381,7 @@ function openForm(cfg) {
 
 const OWNER_TITLES = {
   cp: 'Контрагент', contract: 'Договор', order: 'Заказ',
-  doc: 'Документ', pay: 'Оплата', price: 'Прайс-лист'
+  doc: 'Документ', pay: 'Оплата', price: 'Прайс-лист', ship: 'Отгрузка'
 };
 
 /* Отметка подписания нужна там, где есть две стороны: договор и
@@ -454,6 +454,10 @@ function ownerLabel(meta) {
   if (meta.ownerKind === 'pay') {
     const p = db().payments.find((x) => x.id === meta.ownerId);
     return p ? 'Оплата от ' + fmtDate(p.date) : 'оплата удалена';
+  }
+  if (meta.ownerKind === 'ship') {
+    const sh = db().shipments.find((x) => x.id === meta.ownerId);
+    return sh ? 'Отгрузка от ' + fmtDate(sh.date) : 'отгрузка удалена';
   }
   return OWNER_TITLES[meta.ownerKind] || 'Прочее';
 }
@@ -685,7 +689,9 @@ function viewDash() {
   const sched = d.schedule.filter((s) => s.status !== 'paid');
   const overdue = sched.filter((s) => schedStatus(s).key === 'overdue');
   const soon = sched.filter((s) => ['soon', 'plan'].indexOf(schedStatus(s).key) >= 0 && monthKey(s.dueDate) === thisMonth);
-  const debtTotal = d.counterparties.reduce((s, c) => s + Math.max(0, balanceOf(c.id).debt), 0);
+  /* Долг по всем контрагентам с учётом авансов: переплата одного
+     уменьшает общий долг, иначе картина завышена */
+  const debtTotal = d.counterparties.reduce((s, c) => s + balanceOf(c.id).debt, 0);
   const activeOrders = d.orders.filter((o) => ['draft', 'agreed', 'documented'].indexOf(o.status) >= 0);
 
   const delta = paidPrev ? ((paidThis - paidPrev) / paidPrev * 100) : null;
@@ -699,8 +705,10 @@ function viewDash() {
     kpi('Просрочено', fmtMoney(sum(overdue, 'amount')),
         overdue.length ? overdue.length + ' ' + plural(overdue.length, 'строка', 'строки', 'строк') + ' графика' : 'нет просрочки',
         overdue.length ? 'kpi--down' : '') +
-    kpi('Долг по счётам', fmtMoney(debtTotal), 'выставлено минус оплачено, авансы не вычитаются',
-        debtTotal > 0 ? 'kpi--warn' : '') +
+    (debtTotal < 0
+      ? kpi('Аванс по счетам', fmtMoney(-debtTotal), 'оплачено больше выставленного', 'kpi--up')
+      : kpi('Долг по счётам', fmtMoney(debtTotal), 'выставлено минус оплачено, авансы вычтены',
+            debtTotal > 0 ? 'kpi--warn' : '')) +
     kpi('Заказы в работе', String(activeOrders.length),
         fmtMoney(activeOrders.reduce((s, o) => s + orderTotal(o), 0)) + ' на сумму');
 
@@ -722,19 +730,9 @@ function viewDash() {
     value: sum(d.payments.filter((p) => p.cpId === c.id))
   })).sort((a, b) => b.value - a.value);
 
-  /* Три доли, которые спрашивают первыми: сколько из заказанного оплачено,
-     насколько закрыт график и чем платят. */
-  const ordersAll = d.orders.reduce((s2, o) => s2 + orderTotal(o), 0);
+  /* Поступления по способу оплаты — одним пончиком с итогом в середине */
   const paidAll = sum(d.payments);
-  const schedAll = sum(d.schedule, 'amount');
-  const schedDone = sum(d.schedule.filter((x) => x.status === 'paid'), 'amount');
-  const bankAll = sum(d.payments.filter((p) => p.method === 'bank'));
-  const ringItems = [
-    { value: paidAll, max: ordersAll, label: 'Оплачено от заказов', cap: 'Доля',
-      sub: fmtMoney(paidAll) + ' из ' + fmtMoney(ordersAll), color: 'var(--c1)' },
-    { value: schedDone, max: schedAll, label: 'График закрыт', cap: 'Доля',
-      sub: fmtMoney(schedAll - schedDone) + ' осталось', color: 'var(--accent)' }
-  ];
+
   /* Безнал всюду зелёный, нал малиновый — пончик держит те же цвета, что
      столбцы и метки, иначе читался бы как другая величина */
   const methodDonut = Object.keys(PAY_METHODS).map((k) => ({
@@ -743,14 +741,10 @@ function viewDash() {
   }));
 
   return '<div class="kpi-grid">' + kpis + '</div>' +
-    '<div class="grid2">' +
-      card('Как идут расчёты', chartSlot('ch-dash-rings', (host) => ringGauge(host, ringItems)),
-        { note: 'Точные суммы — под каждым кольцом и в таблицах разделов.' }) +
-      card('Нал и безнал',
-        chartSlot('ch-dash-donut', (host) => donutChart(host, methodDonut,
-          { cap: 'Поступило', center: fmtShort(paidAll) })),
-        { note: 'За всё время. Помесячно — на графике ниже.' }) +
-    '</div>' +
+    card('Нал и безнал',
+      chartSlot('ch-dash-donut', (host) => donutChart(host, methodDonut,
+        { cap: 'Поступило', center: fmtShort(paidAll) })),
+      { note: 'За всё время. Помесячно — на графике ниже.' }) +
     card('Оплаты по месяцам — нал и безнал',
       chartSlot('ch-dash-pay', (host) => stackedBars(host, { labels: payMonths, series: seriesMethod }),
         seriesTable(payMonths, seriesMethod)),
@@ -861,7 +855,7 @@ function docTable(rows, opts) {
       '<th>Дата</th><th>Тип</th><th>Номер</th><th>Договор</th><th class="num">Сумма</th><th>Скан</th>' +
       '</tr></thead><tbody>' + rows.map((x) => '<tr>' +
         '<td class="nowrap">' + fmtDate(x.date) + '</td>' +
-        '<td class="nowrap">' + esc(DOC_TYPES[x.type] || x.type) + '</td>' +
+        '<td class="nowrap">' + esc(DOC_TYPES[x.type] || x.type) + baseDocHTML(x) + '</td>' +
         '<td class="nowrap">' + esc(x.number || '—') + '</td>' +
         '<td>' + contractTag(x.cpId, x.contractId) + '</td>' +
         '<td class="num">' + (Number(x.amount) ? fmtMoney(x.amount) : '<span class="hint">—</span>') + '</td>' +
@@ -874,7 +868,7 @@ function docTable(rows, opts) {
     '</tr></thead><tbody>' +
     rows.map((x) => '<tr>' +
       '<td class="nowrap">' + fmtDate(x.date) + '</td>' +
-      '<td class="nowrap">' + esc(DOC_TYPES[x.type] || x.type) + '</td>' +
+      '<td class="nowrap">' + esc(DOC_TYPES[x.type] || x.type) + baseDocHTML(x) + '</td>' +
       '<td class="nowrap">' + esc(x.number || '—') + '</td>' +
       (o.hideCp ? '' : '<td class="nowrap">' + esc(cpName(x.cpId)) + '</td>') +
       '<td>' + contractTag(x.cpId, x.contractId) + '</td>' +
@@ -905,7 +899,7 @@ function orderTable(rows, opts) {
   if (!rows.length) return emptyBox('Заказов по этому фильтру нет');
   return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
     '<th>Дата</th><th>Номер</th>' + (o.hideCp ? '' : '<th>Контрагент</th>') + '<th>Договор</th>' +
-    '<th>Статус</th><th class="num">Позиций</th><th class="num">Сумма</th>' +
+    '<th>Статус</th><th>Отгрузка</th><th class="num">Позиций</th><th class="num">Сумма</th>' +
     '<th class="num">Выставлено</th><th class="num">Оплачено</th>' +
     '<th>Готовность оплаты</th><th></th></tr></thead><tbody>' +
     rows.map((x) => {
@@ -918,6 +912,7 @@ function orderTable(rows, opts) {
         (o.hideCp ? '' : '<td class="nowrap">' + esc(cpName(x.cpId)) + '</td>') +
         '<td>' + contractTag(x.cpId, x.contractId) + '</td>' +
         '<td>' + orderTag(x.status) + '</td>' +
+        '<td class="nowrap">' + shipTag(x) + '</td>' +
         '<td class="num">' + x.items.length + '</td>' +
         '<td class="num">' + fmtMoney(total) + '</td>' +
         '<td class="num">' + (invoicedByOrder(x.id) ? fmtMoney(invoicedByOrder(x.id)) : '<span class="hint">—</span>') + '</td>' +
@@ -927,7 +922,7 @@ function orderTable(rows, opts) {
         '<td><button class="btn btn--sm" data-act="order-open" data-id="' + esc(x.id) + '" type="button">Открыть</button></td>' +
         '</tr>';
     }).join('') +
-    '</tbody><tfoot><tr><td colspan="' + (o.hideCp ? 5 : 6) + '">Итого ' + rows.length + ' ' +
+    '</tbody><tfoot><tr><td colspan="' + (o.hideCp ? 6 : 7) + '">Итого ' + rows.length + ' ' +
     plural(rows.length, 'заказ', 'заказа', 'заказов') + '</td>' +
     '<td class="num">' + fmtMoney(rows.reduce((s, x) => s + orderTotal(x), 0)) + '</td>' +
     '<td class="num">' + fmtMoney(rows.reduce((s, x) => s + invoicedByOrder(x.id), 0)) + '</td>' +
@@ -1267,6 +1262,12 @@ function viewOrders() {
       kpi('Черновики', String(draft.length), fmtMoney(draft.reduce((s, o) => s + orderTotal(o), 0)) + ' — ещё собираются') +
       kpi('Оплачено по этим заказам', fmtMoney(rows.reduce((s, o) => s + paidByOrder(o.id), 0)),
           'привязанные оплаты', 'kpi--up') +
+      (function () {
+        const waiting = rows.filter((o) => orderShipState(o).key !== 'full' && o.status !== 'draft');
+        return kpi('Ждут отгрузки', String(waiting.length),
+          waiting.length ? fmtMoney(waiting.reduce((s2, o) => s2 + orderTotal(o), 0)) + ' на сумму' : 'всё уехало',
+          waiting.length ? 'kpi--warn' : '');
+      })() +
     '</div>' +
     card('Заказы', orderTable(rows), { flush: true,
       note: 'Заказ можно завести черновиком и дополнять позициями, пока не дошло до документов. Нажмите «Открыть», чтобы редактировать.' }) +
@@ -1303,7 +1304,8 @@ function viewOrderEdit() {
 
   const items = '<div class="table-wrap"><table class="tbl"><thead><tr>' +
     '<th style="min-width:220px">Позиция</th><th style="width:90px">Ед.</th><th style="width:110px" class="num">Кол-во</th>' +
-    '<th style="width:130px" class="num">Цена</th><th class="num">Сумма</th><th style="width:48px"></th>' +
+    '<th style="width:130px" class="num">Цена</th><th class="num">Сумма</th>' +
+    '<th style="width:120px" class="num">Отгружено</th><th style="width:48px"></th>' +
     '</tr></thead><tbody>' +
     (o.items.length ? o.items.map((it) =>
       '<tr><td><input data-item="' + esc(it.id) + '" data-field="name" value="' + esc(it.name || '') + '"></td>' +
@@ -1311,16 +1313,19 @@ function viewOrderEdit() {
       '<td><input class="num" type="number" step="any" inputmode="decimal" data-item="' + esc(it.id) + '" data-field="qty" value="' + esc(it.qty) + '"></td>' +
       '<td><input class="num" type="number" step="any" inputmode="decimal" data-item="' + esc(it.id) + '" data-field="price" value="' + esc(it.price) + '"></td>' +
       '<td class="num" data-sum-for="' + esc(it.id) + '">' + fmtMoney((Number(it.qty) || 0) * (Number(it.price) || 0)) + '</td>' +
+      '<td class="num">' + shipCellHTML(o, it) + '</td>' +
       '<td><button class="btn btn--sm btn--danger" data-act="item-del" data-id="' + esc(it.id) + '" type="button" title="Убрать позицию">✕</button></td></tr>'
-    ).join('') : '<tr><td colspan="6" class="empty">Позиций пока нет — добавьте первую</td></tr>') +
-    '</tbody><tfoot><tr><td colspan="4">Итого по заказу</td><td class="num" id="order-total">' + fmtMoney(total) + '</td><td></td></tr></tfoot></table></div>';
+    ).join('') : '<tr><td colspan="7" class="empty">Позиций пока нет — добавьте первую</td></tr>') +
+    '</tbody><tfoot><tr><td colspan="4">Итого по заказу</td><td class="num" id="order-total">' + fmtMoney(total) + '</td><td colspan="2"></td></tr></tfoot></table></div>';
 
   const actions =
     '<div class="row-actions">' +
       '<button class="btn btn--primary" data-act="item-add" type="button">+ Позиция</button>' +
       '<button class="btn" data-act="order-price-pick" type="button">Из прайса</button>' +
-      '<button class="btn" data-act="order-make-doc" data-type="invoice" type="button">Выписать счёт</button>' +
-      '<button class="btn" data-act="order-make-doc" data-type="spec" type="button">Сформировать спецификацию</button>' +
+      '<button class="btn" data-act="order-issue" data-type="invoice" type="button">Выписать счёт</button>' +
+      '<button class="btn" data-act="order-issue" data-type="spec" type="button">Сформировать спецификацию</button>' +
+      '<button class="btn" data-act="order-issue" data-type="upd" type="button">Внести УПД</button>' +
+      '<button class="btn" data-act="order-issue" data-type="act" type="button">Внести акт</button>' +
       '<button class="btn" data-act="order-make-sched" type="button">Внести в график оплат</button>' +
       '<button class="btn" data-act="order-make-pay" type="button">Отметить оплату</button>' +
     '</div>';
@@ -1328,7 +1333,14 @@ function viewOrderEdit() {
   return header +
     '<div class="kpi-grid" id="order-kpis">' + orderKpisHTML(o) + '</div>' +
     card('Позиции заказа', items + '<div style="margin-top:12px">' + actions + '</div>',
-      { note: 'Счёт и спецификация создаются на текущую сумму заказа и сразу попадают в историю документов контрагента.' }) +
+      { note: 'Счёт — основной документ по заказу: спецификация, УПД и акт выпускаются от него и ' +
+        'хранят на него ссылку, поэтому сначала выписывается счёт. Любой документ создаётся только ' +
+        'вместе с файлом — без приложенного экземпляра кнопка «Создать» не нажимается.' }) +
+    card('Отгрузки', shipTable(o) + '<div style="margin-top:12px" class="row-actions">' +
+        '<button class="btn btn--primary" data-act="ship-new" type="button">+ Отгрузка</button>' +
+      '</div>',
+      { note: 'Отгрузок может быть несколько: заказ закрывается по частям. ' +
+        'В колонке «Отгружено» у позиций видно, что уже уехало, а что ещё нет.' }) +
     card('Файлы заказа', attachBlock('order', o.id, o.cpId, {
       title: 'Перетащите файлы заказа или нажмите, чтобы выбрать',
       hint: 'Заявка от клиента, переписка, фото отгрузки, расчёт в Excel — всё, что относится к заказу.'
@@ -1347,6 +1359,7 @@ function viewOrderEdit() {
    их же разметка подставляется при живой правке строк. */
 function orderKpisHTML(o) {
   const ch = orderChain(o);
+  const ship = orderShipState(o);
   const pct = ch.total ? Math.min(100, ch.paid / ch.total * 100) : 0;
   const invCount = invoicesOfOrder(o.id).length;
   return kpi('Сумма заказа', fmtMoney(ch.total),
@@ -1360,8 +1373,14 @@ function orderKpisHTML(o) {
         'kpi--up') +
     kpi('Остаток', fmtMoney(Math.max(0, ch.left)), ch.left > 0.5 ? 'ждём оплату' : 'закрыт',
         ch.left > 0.5 ? 'kpi--warn' : '') +
+    kpi('Отгрузка', ship.label,
+        ship.count
+          ? ship.count + ' ' + plural(ship.count, 'отгрузка', 'отгрузки', 'отгрузок') +
+            ' · ' + fmtPct(ship.pct) + ' позиций'
+          : (o.shipDate ? 'план на ' + fmtDate(o.shipDate) : 'отгрузок не было'),
+        ship.key === 'full' ? 'kpi--up' : ship.key === 'part' ? 'kpi--warn' : '') +
     kpi('Статус', ORDER_STATUSES[o.status] ? esc(ORDER_STATUSES[o.status].label) : '—',
-        o.shipDate ? 'отгрузка ' + fmtDate(o.shipDate) : 'дата отгрузки не задана');
+        o.shipDate ? 'план отгрузки ' + fmtDate(o.shipDate) : 'дата отгрузки не задана');
 }
 
 /* Правка позиции обновляет только то, что от неё зависит: суммы строк,
@@ -1535,18 +1554,29 @@ function viewAnalytics() {
     values: byMonth(d.orders, 'date', months, orderTotal)
   }];
 
-  /* Топ позиций по сумме — по всем заказам выборки */
+  /* Что заказывают чаще всего. Считаем по позициям заказов: сколько
+     заказов содержит позицию. Именно число заказов, а не количество
+     штук: десять тонн в одном заказе не значат, что товар ходовой. */
   const itemAgg = {};
-  orders.forEach((o) => o.items.forEach((it) => {
-    const key = (it.name || '—').trim();
-    if (!itemAgg[key]) itemAgg[key] = { amount: 0, qty: 0, unit: it.unit || '' };
-    itemAgg[key].amount += (Number(it.qty) || 0) * (Number(it.price) || 0);
-    itemAgg[key].qty += Number(it.qty) || 0;
-  }));
+  orders.forEach((o) => {
+    const seen = {};
+    o.items.forEach((it) => {
+      const key = (it.name || '').trim();
+      if (!key) return;
+      if (!itemAgg[key]) itemAgg[key] = { orders: 0, qty: 0, amount: 0, unit: it.unit || '' };
+      itemAgg[key].qty += Number(it.qty) || 0;
+      itemAgg[key].amount += (Number(it.qty) || 0) * (Number(it.price) || 0);
+      if (!seen[key]) { itemAgg[key].orders += 1; seen[key] = true; }
+    });
+  });
   const topItems = Object.keys(itemAgg).map((k) => ({ name: k, data: itemAgg[k] }))
-    .sort((a, b) => b.data.amount - a.data.amount).slice(0, 10);
+    .sort((a, b) => (b.data.orders - a.data.orders) || (b.data.amount - a.data.amount))
+    .slice(0, 12);
   const itemRows = topItems.map((x) => ({
-    label: x.name, parts: [{ label: 'Сумма', color: 'var(--c1)', value: x.data.amount }]
+    label: x.name,
+    title: x.name + ' — в ' + x.data.orders + ' ' + plural(x.data.orders, 'заказе', 'заказах', 'заказах') +
+      ', всего ' + fmtQty(x.data.qty) + ' ' + (x.data.unit || '') + ' на ' + fmtMoney(x.data.amount),
+    parts: [{ label: 'Заказов', color: 'var(--c1)', value: x.data.orders }]
   }));
 
   /* Итоги по контрагентам — та же выборка числами */
@@ -1595,7 +1625,7 @@ function viewAnalytics() {
     ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
       '<th>Заказ</th><th>Контрагент</th><th>Договор</th><th>Статус</th>' +
       '<th class="num">Сумма заказа</th><th class="num">Выставлено</th>' +
-      '<th class="num">Оплачено</th><th class="num">Остаток</th><th>Документы</th></tr></thead><tbody>' +
+      '<th class="num">Оплачено</th><th class="num">Остаток</th><th>Отгрузка</th><th>Документы</th></tr></thead><tbody>' +
       chainRows.map((r) => {
         const have = {};
         r.ch.docs.forEach((x) => { have[x.type] = true; });
@@ -1617,6 +1647,7 @@ function viewAnalytics() {
             (r.ch.payCount > 1 ? '<div class="hint" style="font-family:var(--sans)">' + r.ch.payCount + ' ' +
               plural(r.ch.payCount, 'платёж', 'платежа', 'платежей') + '</div>' : '') + '</td>' +
           '<td class="num">' + (r.ch.left > 0.5 ? fmtMoney(r.ch.left) : '<span class="hint">закрыт</span>') + '</td>' +
+          '<td class="nowrap">' + shipTag(r.o) + '</td>' +
           '<td class="nowrap">' + chips + (r.ch.overpaid ? ' ' + tag('оплачено больше счёта', 'tag--warn') : '') + '</td>' +
         '</tr>';
       }).join('') +
@@ -1626,7 +1657,7 @@ function viewAnalytics() {
         '<td class="num">' + fmtMoney(chainRows.reduce((a, r) => a + r.ch.invoiced, 0)) + '</td>' +
         '<td class="num">' + fmtMoney(chainRows.reduce((a, r) => a + r.ch.paid, 0)) + '</td>' +
         '<td class="num">' + fmtMoney(chainRows.reduce((a, r) => a + Math.max(0, r.ch.left), 0)) + '</td>' +
-        '<td></td></tr></tfoot></table></div>'
+        '<td colspan="2"></td></tr></tfoot></table></div>'
     : emptyBox('Заказов по этому фильтру нет');
 
   return filtersHTML({ cp: true, contract: true, period: true }) +
@@ -1651,8 +1682,11 @@ function viewAnalytics() {
       card('Сумма заказов по месяцам',
         chartSlot('ch-an-ord', (host) => stackedBars(host, { labels: labels, series: orderSeries }),
           seriesTable(labels, orderSeries)), { tools: tableToggle('ch-an-ord') }) +
-      card('Топ позиций по сумме', chartSlot('ch-an-items', (host) => hBars(host, itemRows)),
-        { note: 'Считается по позициям заказов выборки.' }) +
+      card('Что заказывают чаще всего',
+        chartSlot('ch-an-items', (host) => hBars(host, itemRows,
+          { fmt: (v) => v + ' ' + plural(v, 'заказ', 'заказа', 'заказов') })),
+        { note: 'Длина полосы — в скольких заказах встречается позиция. ' +
+          'Наведите на название, чтобы увидеть количество и сумму.' }) +
     '</div>';
 }
 
@@ -2069,6 +2103,315 @@ function openPricePicker(order) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Отгрузки                                                           */
+/* ------------------------------------------------------------------ */
+/* Отгрузка — это факт: что и сколько уехало. Их может быть несколько на
+   один заказ, поэтому считаем по позициям: по каждой видно, сколько
+   заказано и сколько уже отгружено. */
+const SHIP_TAGS = { none: 'tag--draft', part: 'tag--warn', full: 'tag--ok' };
+
+function shipTag(order) {
+  const st = orderShipState(order);
+  return tag(st.label, SHIP_TAGS[st.key] || '');
+}
+
+/* Сколько позиции уже уехало: число и остаток */
+function shipCellHTML(order, it) {
+  const done = shippedQty(order.id, it.id);
+  const want = Number(it.qty) || 0;
+  if (!done) return '<span class="hint">—</span>';
+  const left = want - done;
+  return fmtQty(done) +
+    (left > 0.0001 ? '<div class="hint" style="font-family:var(--sans)">осталось ' + fmtQty(left) + '</div>'
+                   : '<div class="hint" style="font-family:var(--sans)">полностью</div>');
+}
+
+function shipTable(order) {
+  const list = shipmentsOfOrder(order.id);
+  if (!list.length) return emptyBox('Отгрузок по заказу ещё не было');
+  return '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+    '<th>Дата</th><th>Документ</th><th>Что уехало</th><th>Комментарий</th><th>Файлы</th><th></th>' +
+    '</tr></thead><tbody>' +
+    list.map((sh) => {
+      const lines = sh.lines.filter((l) => Number(l.qty) > 0).map((l) => {
+        const it = order.items.find((x) => x.id === l.itemId);
+        return esc((it ? it.name : 'позиция удалена') + ' — ' + fmtQty(l.qty) + ' ' + (it ? (it.unit || '') : ''));
+      });
+      return '<tr>' +
+        '<td class="nowrap">' + fmtDate(sh.date) + '</td>' +
+        '<td class="nowrap">' + (sh.number ? esc(sh.number) : '<span class="hint">—</span>') + '</td>' +
+        '<td>' + (lines.length ? lines.join('<br>') : '<span class="hint">позиции не указаны</span>') + '</td>' +
+        '<td>' + esc(sh.note || '') + '</td>' +
+        '<td class="nowrap">' + clipFor('ship', sh.id) + '</td>' +
+        '<td><div class="row-actions">' +
+          '<button class="btn btn--sm btn--primary" data-act="ship-files" data-id="' + esc(sh.id) + '" type="button">Файлы</button>' +
+          '<button class="btn btn--sm" data-act="ship-edit" data-id="' + esc(sh.id) + '" type="button">Правка</button>' +
+        '</div></td>' +
+      '</tr>';
+    }).join('') +
+    '</tbody></table></div>';
+}
+
+/* Окно отгрузки: позиции заказа с остатком. По умолчанию подставляется
+   то, что ещё не уехало, — чаще всего отгружают именно остаток. */
+function openShipment(order, shipId) {
+  const existing = shipId ? db().shipments.find((x) => x.id === shipId) : null;
+  if (!order.items.length) { alert('В заказе нет позиций — отгружать нечего.'); return; }
+
+  const rows = order.items.map((it) => {
+    const already = shippedQty(order.id, it.id);
+    const mine = existing ? (existing.lines.find((l) => l.itemId === it.id) || {}).qty || 0 : 0;
+    /* При правке то, что отгружено этой же отгрузкой, не считается чужим */
+    const others = already - mine;
+    return { it: it, already: others, left: Math.max(0, (Number(it.qty) || 0) - others), mine: mine };
+  });
+
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML =
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="Отгрузка">' +
+      '<header class="modal__head"><h2>' +
+        (existing ? 'Отгрузка от ' + fmtDate(existing.date) : 'Новая отгрузка') +
+        ' — заказ ' + esc(order.number || '') + '</h2>' +
+        '<button class="btn btn--sm" data-close type="button">Закрыть</button></header>' +
+      '<form class="modal__body" id="ship-form">' +
+        '<div class="form-grid">' +
+          '<label class="field"><span>Дата отгрузки</span><input name="date" type="date" value="' +
+            esc(existing ? existing.date : today()) + '" required></label>' +
+          '<label class="field"><span>Документ отгрузки</span><input name="number" value="' +
+            esc(existing ? existing.number : '') + '" placeholder="УПД, ТН, номер машины"></label>' +
+          '<label class="field field--wide"><span>Комментарий</span><textarea name="note">' +
+            esc(existing ? existing.note : '') + '</textarea></label>' +
+        '</div>' +
+        '<h3 style="margin:16px 0 8px">Что уехало</h3>' +
+        '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+          '<th>Позиция</th><th>Ед.</th><th class="num">Заказано</th>' +
+          '<th class="num">Уже отгружено</th><th style="width:130px" class="num">Отгружаем</th>' +
+        '</tr></thead><tbody>' +
+        rows.map((r) => '<tr>' +
+          '<td>' + esc(r.it.name || '') + '</td>' +
+          '<td class="nowrap">' + esc(r.it.unit || '') + '</td>' +
+          '<td class="num">' + fmtQty(r.it.qty) + '</td>' +
+          '<td class="num">' + (r.already ? fmtQty(r.already) : '<span class="hint">—</span>') + '</td>' +
+          '<td><input class="num" type="number" step="any" min="0" data-ship-qty="' + esc(r.it.id) +
+            '" value="' + (existing ? r.mine : r.left) + '"></td>' +
+        '</tr>').join('') +
+        '</tbody></table></div>' +
+      '</form>' +
+      '<footer class="modal__foot">' +
+        (existing ? '<button class="btn btn--danger" data-ship-del type="button">Удалить отгрузку</button>' : '') +
+        '<button class="btn" data-close type="button">Отмена</button>' +
+        '<button class="btn btn--primary" data-ship-save type="button">Сохранить отгрузку</button>' +
+      '</footer>' +
+    '</div>';
+
+  const close = () => { document.removeEventListener('keydown', onKey); back.remove(); render(); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+
+  back.addEventListener('click', (e) => {
+    if (e.target === back || e.target.closest('[data-close]')) { close(); return; }
+
+    if (e.target.closest('[data-ship-del]') && existing) {
+      if (!confirm('Удалить эту отгрузку?')) return;
+      db().shipments = db().shipments.filter((x) => x.id !== existing.id);
+      save('Удалена отгрузка по заказу ' + (order.number || ''));
+      dropFilesOf('ship', existing.id);
+      close();
+      return;
+    }
+    if (!e.target.closest('[data-ship-save]')) return;
+
+    const form = back.querySelector('#ship-form');
+    if (!form.reportValidity()) return;
+    const lines = [];
+    back.querySelectorAll('[data-ship-qty]').forEach((input) => {
+      const qty = Number(String(input.value).replace(',', '.')) || 0;
+      if (qty > 0) lines.push({ itemId: input.getAttribute('data-ship-qty'), qty: qty });
+    });
+    if (!lines.length) { alert('Укажите количество хотя бы по одной позиции.'); return; }
+
+    const ship = existing || { id: uid('sh'), cpId: order.cpId, orderId: order.id };
+    ship.date = form.elements.date.value;
+    ship.number = form.elements.number.value.trim();
+    ship.note = form.elements.note.value.trim();
+    ship.lines = lines;
+    if (!existing) db().shipments.push(ship);
+
+    /* Отгрузили всё — заказ сам переходит в «отгружен»: статус не должен
+       отставать от факта, иначе списки врут */
+    if (orderShipState(order).key === 'full' &&
+        ['draft', 'agreed', 'documented'].indexOf(order.status) >= 0) {
+      order.status = 'shipped';
+    }
+    save((existing ? 'Изменена отгрузка по заказу ' : 'Отгрузка по заказу ') + (order.number || '') +
+         ' — ' + cpName(order.cpId));
+    close();
+  });
+
+  document.body.appendChild(back);
+}
+
+/* ------------------------------------------------------------------ */
+/* Выпуск документа по заказу                                         */
+/* ------------------------------------------------------------------ */
+/* Счёт — корень цепочки: спецификация, УПД и акт выпускаются от него и
+   хранят ссылку на счёт. Поэтому пока счёта нет, остальное выпустить
+   нельзя — иначе документы повиснут сами по себе.
+
+   И ещё одно правило: документ не создаётся без приложенного файла.
+   Запись без скана не имеет смысла — по ней нечего отправить и нечем
+   подтвердить, поэтому кнопка «Создать» ждёт файл. */
+
+const DOC_CHAIN_HINTS = {
+  invoice: 'Счёт — основной документ по заказу. Остальные выпускаются от него.',
+  spec:    'Спецификация выпускается к счёту и описывает его состав.',
+  upd:     'УПД выпускается к счёту и закрывает отгрузку.',
+  act:     'Акт выпускается к счёту.'
+};
+
+function baseInvoiceOf(orderId) {
+  return invoicesOfOrder(orderId)[0] || null;
+}
+
+/* Ссылка на счёт-основание в строке документа */
+function baseDocHTML(doc) {
+  if (!doc.baseDocId) return '';
+  const base = db().documents.find((x) => x.id === doc.baseDocId);
+  return base
+    ? '<div class="hint" style="font-family:var(--sans)">к счёту №' + esc(base.number || '—') + '</div>'
+    : '<div class="hint" style="font-family:var(--sans)">счёт-основание удалён</div>';
+}
+
+function openDocIssue(order, type) {
+  const cp = cpById(order.cpId);
+  const total = orderTotal(order);
+  const base = type === 'invoice' ? null : baseInvoiceOf(order.id);
+
+  if (type !== 'invoice' && !base) {
+    alert('Сначала выпишите счёт.\n\nСчёт — основной документ по заказу: ' +
+          (DOC_TYPES[type] || 'документ').toLowerCase() + ' выпускается от него.');
+    return;
+  }
+  if (!total) { alert('Сначала добавьте позиции: сумма заказа пока нулевая.'); return; }
+
+  /* Идентификатор документа нужен заранее: файлы прикладываются до того,
+     как запись создана. Если окно закрыть без сохранения, загруженное
+     удаляем — иначе остались бы файлы без документа. */
+  const newId = uid('doc');
+  let saved = false;
+
+  const numberGuess = type === 'invoice' ? (order.number || '')
+    : (type === 'spec' ? 'С-' : type === 'upd' ? 'УПД-' : 'А-') + (base ? (base.number || '') : (order.number || ''));
+
+  const attachOpts = {
+    title: 'Приложите файл документа — без него создать нельзя',
+    hint: 'Подписанный или ещё не подписанный экземпляр: PDF, Word, Excel, скан или фото.'
+  };
+
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML =
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="Новый документ">' +
+      '<header class="modal__head"><h2>' + esc(DOC_TYPES[type] || 'Документ') + ' по заказу ' +
+        esc(order.number || '') + '</h2>' +
+        '<button class="btn btn--sm" data-close type="button">Закрыть</button></header>' +
+      '<form class="modal__body" id="issue-form">' +
+        '<p class="hint" style="margin-top:0">' + esc(cp ? cp.name : '') + ' · ' + esc(DOC_CHAIN_HINTS[type] || '') +
+          (base ? ' Основание — счёт №' + esc(base.number || '—') + ' от ' + fmtDate(base.date) + '.' : '') + '</p>' +
+        '<div class="form-grid">' +
+          '<label class="field"><span>Номер</span><input name="number" value="' + esc(numberGuess) + '"></label>' +
+          '<label class="field"><span>Дата</span><input name="date" type="date" value="' + esc(today()) + '"></label>' +
+          '<label class="field"><span>Сумма, ₽</span><input name="amount" type="number" step="any" value="' +
+            (base ? esc(base.amount) : esc(total)) + '"></label>' +
+          '<label class="field"><span>Статус</span><select name="status">' +
+            selectOptions(Object.keys(DOC_STATUSES).map((k) => [k, DOC_STATUSES[k].label]), 'sent') + '</select></label>' +
+          '<label class="field field--wide"><span>Комментарий</span><textarea name="note"></textarea></label>' +
+        '</div>' +
+      '</form>' +
+      '<div class="modal__body" style="padding-top:0" id="issue-files">' +
+        attachBlock('doc', newId, order.cpId, attachOpts) +
+      '</div>' +
+      '<footer class="modal__foot">' +
+        '<span class="hint" id="issue-hint" style="margin-right:auto"></span>' +
+        '<button class="btn" data-close type="button">Отмена</button>' +
+        '<button class="btn btn--primary" data-issue-save type="button">Создать документ</button>' +
+      '</footer>' +
+    '</div>';
+
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    const stray = saved ? [] : filesOf('doc', newId);
+    back.remove();
+    Promise.all(stray.map((f) => deleteFileApi(f.id).catch(() => null))).then(render);
+  };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+
+  const refresh = () => {
+    const n = filesOf('doc', newId).length;
+    const btn = back.querySelector('[data-issue-save]');
+    const hint = back.querySelector('#issue-hint');
+    btn.disabled = n === 0;
+    hint.textContent = n
+      ? 'Приложено ' + n + ' ' + plural(n, 'файл', 'файла', 'файлов')
+      : 'Сначала приложите файл документа';
+  };
+  const repaint = () => {
+    back.querySelector('#issue-files').innerHTML = attachBlock('doc', newId, order.cpId, attachOpts);
+    bindDrops(back);
+    refresh();
+  };
+  back.repaint = repaint;
+
+  back.addEventListener('click', (e) => {
+    if (e.target === back || e.target.closest('[data-close]')) { close(); return; }
+    const del = e.target.closest('[data-act="file-del"]');
+    if (del) {
+      const meta = fileById(del.getAttribute('data-id'));
+      if (!meta || !confirm('Удалить файл «' + meta.name + '»?')) return;
+      deleteFileApi(meta.id).then(repaint).catch((err) => alert('Не удалось удалить: ' + err.message));
+      return;
+    }
+    if (!e.target.closest('[data-issue-save]')) return;
+
+    if (!filesOf('doc', newId).length) { alert('Приложите файл документа.'); return; }
+    const form = back.querySelector('#issue-form');
+    const doc = {
+      id: newId,
+      cpId: order.cpId,
+      contractId: order.contractId,
+      orderId: order.id,
+      baseDocId: base ? base.id : '',
+      type: type,
+      number: form.elements.number.value.trim(),
+      date: form.elements.date.value,
+      amount: Number(String(form.elements.amount.value).replace(',', '.')) || 0,
+      status: form.elements.status.value,
+      note: form.elements.note.value.trim()
+    };
+    db().documents.push(doc);
+    /* Выписали счёт — заказ перестаёт быть черновиком */
+    if (type === 'invoice' && (order.status === 'draft' || order.status === 'agreed')) {
+      order.status = 'documented';
+    }
+    saved = true;
+    save('Выпущен документ ' + (DOC_TYPES[type] || '') + ' №' + (doc.number || '—') +
+         ' по заказу ' + (order.number || '') + ' — ' + cpName(order.cpId));
+    close();
+  });
+
+  back.addEventListener('change', (e) => {
+    const sel = e.target.closest('[data-file-kind]');
+    if (sel) updateFileMeta(sel.getAttribute('data-file-kind'), { kind: sel.value }).catch(() => null);
+  });
+
+  document.body.appendChild(back);
+  bindDrops(back);
+  refresh();
+}
+
+/* ------------------------------------------------------------------ */
 /* Отрисовка                                                          */
 /* ------------------------------------------------------------------ */
 function render() {
@@ -2264,16 +2607,26 @@ function handleAction(act, node) {
       save('Убрана позиция из заказа ' + (o.number || '')); render(); return;
     }
 
-    case 'order-make-doc': {
+    case 'ship-new': {
       const o = orderById(route.orderId);
-      if (!o) return;
-      const type = node.getAttribute('data-type');
-      const total = orderTotal(o);
-      if (!total) { alert('Сначала добавьте позиции: сумма заказа пока нулевая.'); return; }
-      formDocument('', { cpId: o.cpId, contractId: o.contractId, orderId: o.id, type: type,
-                         amount: total, number: (type === 'spec' ? 'С-' : '') + (o.number || '') });
-      /* Выписали счёт — заказ перестаёт быть черновиком */
-      if (o.status === 'draft' || o.status === 'agreed') { o.status = 'documented'; save(); }
+      if (o) openShipment(o, '');
+      return;
+    }
+    case 'ship-edit': {
+      const o = orderById(route.orderId);
+      if (o) openShipment(o, id);
+      return;
+    }
+    case 'ship-files': {
+      const sh = db().shipments.find((x) => x.id === id);
+      if (!sh) return;
+      openAttachModal('ship', sh.id, sh.cpId, 'Файлы отгрузки от ' + fmtDate(sh.date),
+        cpName(sh.cpId) + (sh.number ? ' · ' + sh.number : ''));
+      return;
+    }
+    case 'order-issue': {
+      const o = orderById(route.orderId);
+      if (o) openDocIssue(o, node.getAttribute('data-type'));
       return;
     }
     case 'order-make-sched': {
@@ -2414,21 +2767,30 @@ function snowflakeSVG() {
     'stroke-width="1.6" stroke-linecap="round">' + arms + '</svg>';
 }
 
+/* Квадратик меню: три полосы в рамке — узнаваемый знак «здесь меню» */
+function burgerSVG() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.7" stroke-linecap="round">' +
+    '<path d="M5 8h14M5 12h14M5 16h14"/></svg>';
+}
+
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   try { localStorage.setItem('sales-platform-theme', theme); } catch (e) { /* не критично */ }
   const btn = document.getElementById('btn-theme');
   if (btn) {
-    /* Значок один и тот же, меняется только его вид: на тёмной теме
-       снежинка горит акцентом, на светлой лежит приглушённым контуром.
-       Что именно произойдёт по нажатию, сказано в подсказке и для
-       экранного диктора. */
-    btn.innerHTML = snowflakeSVG();
-    btn.classList.toggle('btn--icon-lit', theme !== 'light');
+    /* Снежинка и текст: в меню нужна подпись, иначе непонятно, что
+       произойдёт по нажатию. На тёмной теме снежинка горит акцентом. */
+    const label = theme === 'light' ? 'Тёмная тема' : 'Светлая тема';
     const action = theme === 'light' ? 'Включить тёмную тему' : 'Включить светлую тему';
-    btn.title = action;
+    btn.innerHTML = '<span class="menu__icon' + (theme !== 'light' ? ' menu__icon--lit' : '') + '">' +
+      snowflakeSVG() + '</span>' + label;
     btn.setAttribute('aria-label', action);
+    btn.title = action;
   }
+
+  const menuBtn = document.getElementById('btn-menu');
+  if (menuBtn && !menuBtn.innerHTML) menuBtn.innerHTML = burgerSVG();
 
   /* Вкладка браузера и шапка берут один и тот же контур. */
   const svg = logoFor(theme);
@@ -2449,6 +2811,28 @@ function init() {
     const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
     applyTheme(next);
     rerenderCharts();
+  });
+
+  /* Меню в правом верхнем углу. Закрывается по выбору пункта, по клику
+     мимо и по Escape — как это принято на сайтах. */
+  const menuPanel = document.getElementById('menu-panel');
+  const menuButton = document.getElementById('btn-menu');
+  const closeMenu = () => {
+    menuPanel.hidden = true;
+    menuButton.setAttribute('aria-expanded', 'false');
+  };
+  menuButton.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = menuPanel.hidden;
+    menuPanel.hidden = !open;
+    menuButton.setAttribute('aria-expanded', String(open));
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
+  document.addEventListener('click', (e) => {
+    if (menuPanel.hidden) return;
+    if (e.target.closest('#menu-panel') && !e.target.closest('.menu__item')) return;
+    if (e.target.closest('#btn-menu')) return;
+    closeMenu();
   });
 
   /* Один обработчик на всю страницу: разметка пересобирается целиком,

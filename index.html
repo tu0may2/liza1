@@ -21,9 +21,32 @@
     </div>
 
     <div class="topbar__actions">
-      <button class="btn btn--icon" id="btn-theme" type="button" title="Сменить тему"></button>
-      <button class="btn" data-act="cp-new" type="button">+ Контрагент</button>
       <button class="btn btn--primary" data-act="order-new" type="button">+ Новый заказ</button>
+
+      <!-- Квадратик в правом верхнем углу: раскрывает меню со всем
+           остальным, чтобы панель не разрасталась кнопками -->
+      <div class="menu">
+        <button class="btn btn--icon" id="btn-menu" type="button"
+                aria-haspopup="true" aria-expanded="false" aria-label="Меню"></button>
+        <div class="menu__panel" id="menu-panel" hidden>
+          <div class="menu__label">Добавить</div>
+          <button class="menu__item" data-act="order-new" type="button">Новый заказ</button>
+          <button class="menu__item" data-act="cp-new" type="button">Контрагента</button>
+          <button class="menu__item" data-act="pay-new" type="button">Оплату</button>
+          <button class="menu__item" data-act="doc-new" type="button">Документ</button>
+          <button class="menu__item" data-act="sched-new" type="button">Платёж в график</button>
+
+          <div class="menu__sep"></div>
+          <div class="menu__label">Перейти</div>
+          <button class="menu__item" data-nav="analytics" type="button">Аналитика</button>
+          <button class="menu__item" data-nav="history" type="button">История правок</button>
+          <button class="menu__item" data-nav="data" type="button">Данные и копии</button>
+
+          <div class="menu__sep"></div>
+          <button class="menu__item" id="btn-theme" type="button"></button>
+          <button class="menu__item" data-act="print" type="button">Печать экрана</button>
+        </div>
+      </div>
     </div>
   </header>
 

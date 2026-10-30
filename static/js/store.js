@@ -69,14 +69,15 @@ function uid(prefix) {
 }
 
 function blankState() {
-  return { schema: 1, counterparties: [], orders: [], documents: [], payments: [], schedule: [] };
+  return { schema: 1, counterparties: [], orders: [], documents: [], payments: [], schedule: [], shipments: [] };
 }
 
 function normalize(doc) {
   const out = Object.assign(blankState(), doc || {});
-  ['counterparties', 'orders', 'documents', 'payments', 'schedule'].forEach((k) => {
+  ['counterparties', 'orders', 'documents', 'payments', 'schedule', 'shipments'].forEach((k) => {
     if (!Array.isArray(out[k])) out[k] = [];
   });
+  out.shipments.forEach((sh) => { if (!Array.isArray(sh.lines)) sh.lines = []; });
   out.counterparties.forEach((c) => {
     if (!Array.isArray(c.contracts)) c.contracts = [];
     if (!Array.isArray(c.priceItems)) c.priceItems = [];
@@ -229,7 +230,7 @@ function removeCounterparty(cpId) {
   if (gone) (gone.contracts || []).forEach((k) => owners.push(['contract', k.id]));
 
   d.counterparties = d.counterparties.filter((c) => c.id !== cpId);
-  ['orders', 'documents', 'payments', 'schedule'].forEach((k) => {
+  ['orders', 'documents', 'payments', 'schedule', 'shipments'].forEach((k) => {
     d[k] = d[k].filter((x) => x.cpId !== cpId);
   });
   save('Удалён контрагент ' + (gone ? gone.name : ''));
@@ -289,6 +290,7 @@ function liveOwners() {
   d.orders.forEach((o) => out.push('order:' + o.id));
   d.documents.forEach((x) => out.push('doc:' + x.id));
   d.payments.forEach((p) => out.push('pay:' + p.id));
+  d.shipments.forEach((sh) => out.push('ship:' + sh.id));
   return out;
 }
 
@@ -296,15 +298,50 @@ function liveOwners() {
 function removeDocument(docId) {
   const doc = db().documents.find((d2) => d2.id === docId);
   /* Оплаты остаются: деньги пришли, даже если счёт убрали. Снимаем только
-     ссылку, чтобы платёж не указывал в пустоту. */
+     ссылку, чтобы платёж не указывал в пустоту. То же с документами,
+     выпущенными от этого счёта. */
   db().payments.forEach((p) => { if (p.docId === docId) p.docId = ''; });
+  db().documents.forEach((x) => { if (x.baseDocId === docId) x.baseDocId = ''; });
   remove('documents', docId, 'Удалён документ ' + (doc ? (DOC_TYPES[doc.type] || '') + ' №' + (doc.number || '') : ''));
   return dropFilesOf('doc', docId);
 }
 
 function removeOrder(orderId) {
+  /* Отгрузки живут только внутри заказа: без него они бессмысленны */
+  db().shipments = db().shipments.filter((sh) => sh.orderId !== orderId);
   remove('orders', orderId, 'Удалён заказ');
   return dropFilesOf('order', orderId);
+}
+
+/* ---------------------------------------------------------------- */
+/* Отгрузки                                                         */
+/* ---------------------------------------------------------------- */
+/* Отгрузка — это факт: что и сколько уехало к покупателю. Их может быть
+   несколько на один заказ, поэтому считаем по позициям: по каждой видно,
+   сколько заказано и сколько уже отгружено. */
+function shipmentsOfOrder(orderId) {
+  return db().shipments
+    .filter((sh) => sh.orderId === orderId)
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+}
+
+function shippedQty(orderId, itemId) {
+  return shipmentsOfOrder(orderId).reduce((total, sh) =>
+    total + sh.lines.reduce((n, l) => n + (l.itemId === itemId ? (Number(l.qty) || 0) : 0), 0), 0);
+}
+
+/* Сводка по отгрузке заказа. Доля считается по количеству позиций, а не
+   по деньгам: отгружают штуки и тонны, а не рубли. */
+function orderShipState(order) {
+  if (!order) return { ordered: 0, shipped: 0, pct: 0, key: 'none', label: 'нет отгрузок', count: 0 };
+  const ordered = order.items.reduce((n, it) => n + (Number(it.qty) || 0), 0);
+  const shipped = order.items.reduce((n, it) => n + shippedQty(order.id, it.id), 0);
+  const count = shipmentsOfOrder(order.id).length;
+  const pct = ordered > 0 ? Math.min(100, shipped / ordered * 100) : 0;
+  let key = 'none', label = 'не отгружен';
+  if (shipped > 0 && shipped + 0.0001 < ordered) { key = 'part'; label = 'отгружен частично'; }
+  else if (ordered > 0 && shipped + 0.0001 >= ordered) { key = 'full'; label = 'отгружен полностью'; }
+  return { ordered: ordered, shipped: shipped, pct: pct, key: key, label: label, count: count };
 }
 
 /* ---------------------------------------------------------------- */
@@ -459,6 +496,15 @@ function seedState() {
       amount: 240000, method: 'bank', note: 'Первый транш по заказу 124.' },
     { id: 'pay-8', cpId: 'cp-sharks', contractId: 'k-sharks-main', orderId: 'ord-3', docId: 'doc-10', date: day(0, 14),
       amount: 95000, method: 'cash', note: 'Доплата налом за срочную партию.' }
+  ];
+
+  s.shipments = [
+    { id: 'sh-1', cpId: 'cp-amur', orderId: 'ord-1', date: day(-3, 18), number: 'УПД-114',
+      note: 'Отгружено полностью, машина своя.',
+      lines: [{ itemId: 'it-1', qty: 12 }, { itemId: 'it-2', qty: 8 }] },
+    { id: 'sh-2', cpId: 'cp-amur', orderId: 'ord-2', date: day(-1, 4), number: 'ТН-118',
+      note: 'Первая часть бартера.',
+      lines: [{ itemId: 'it-3', qty: 1200 }, { itemId: 'it-4', qty: 60 }] }
   ];
 
   s.schedule = [

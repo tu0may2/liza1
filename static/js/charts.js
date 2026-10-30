@@ -173,6 +173,9 @@ function stackedBars(host, opts) {
   /* В фокусе — последний период, в котором что-то было: именно про «сейчас»
      обычно и спрашивают. Остальные столбцы приглушены, чтобы фокус был
      виден сразу; при наведении свет переходит на столбец под курсором. */
+  /* Под подпись месяца нужно около 52 пикселей вместе с воздухом */
+  const labelStep = Math.max(1, Math.ceil(labels.length / Math.max(1, Math.floor(plotW / 52))));
+
   let focus = -1;
   for (let i = labels.length - 1; i >= 0; i--) { if (sums[i] > 0) { focus = i; break; } }
   if (opts.focus != null) focus = opts.focus;
@@ -208,8 +211,13 @@ function stackedBars(host, opts) {
       acc += o.v;
     });
 
-    const tl = el('text', { x: cx, y: H - padB + 17, 'text-anchor': 'middle' }, svg);
-    tl.textContent = lab;
+    /* Подписи месяцев разрежаем под ширину графика: в узкой карточке их
+       помещается меньше, и без этого они налезают друг на друга.
+       Последний период подписываем всегда — он в фокусе. */
+    if (i % labelStep === 0 || i === labels.length - 1) {
+      const tl = el('text', { x: cx, y: H - padB + 17, 'text-anchor': 'middle' }, svg);
+      tl.textContent = lab;
+    }
 
     /* Подпись итога столбца — прямая метка вместо числа на каждом сегменте */
     let vl = null;
@@ -317,9 +325,10 @@ function lineChart(host, opts) {
     });
   });
 
+  /* Разрежаем подписи под ширину, а не под число точек: в половинной
+     карточке мест вдвое меньше, чем в полной */
+  const everyN = Math.max(1, Math.ceil(labels.length / Math.max(1, Math.floor(plotW / 52))));
   labels.forEach((lab, i) => {
-    /* Подписи оси X разрежаем, если точек много: иначе они наезжают */
-    const everyN = Math.ceil(labels.length / 12);
     if (i % everyN === 0 || i === labels.length - 1) {
       const tl = el('text', { x: xOf(i), y: H - padB + 17, 'text-anchor': 'middle' }, svg);
       tl.textContent = lab;
@@ -373,7 +382,7 @@ function hBars(host, rows, opts) {
     row.className = 'bar-row';
     const parts = r.parts.filter((p) => Number(p.value) > 0);
     row.innerHTML =
-      '<span title="' + esc(r.label) + '">' + esc(r.label) + '</span>' +
+      '<span title="' + esc(r.title || r.label) + '">' + esc(r.label) + '</span>' +
       '<span class="bar-track">' + parts.map((p) =>
         '<i class="bar-fill" style="width:' + (totals[i] ? (p.value / max * 100) : 0) +
         '%;background:linear-gradient(90deg, color-mix(in srgb, ' + p.color + ' 45%, transparent), ' + p.color + ')' +
