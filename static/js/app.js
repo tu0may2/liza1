@@ -10,7 +10,8 @@
 'use strict';
 
 let route = { view: 'dash', cpId: '', sub: 'summary', orderId: '' };
-let filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '', scan: '', search: '' };
+let filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '', scan: '', search: '',
+                libGroup: '', libSign: '' };
 
 /* Подглядывающий котик — общий для пустых мест платформы. Контур один,
    цвет берётся от текста, поэтому он живёт на любой подложке и в обеих
@@ -381,7 +382,7 @@ function openForm(cfg) {
 
 const OWNER_TITLES = {
   cp: 'Контрагент', contract: 'Договор', order: 'Заказ',
-  doc: 'Документ', pay: 'Оплата', price: 'Прайс-лист', ship: 'Отгрузка'
+  doc: 'Документ', pay: 'Оплата', price: 'Прайс-лист', ship: 'Отгрузка', brand: 'Бренд-бук'
 };
 
 /* Отметка подписания нужна там, где есть две стороны: договор и
@@ -939,7 +940,8 @@ function viewCp() {
 
   const subs = [['summary', 'Сводка'], ['docs', 'Документы'], ['orders', 'Заказы'],
                 ['payments', 'Оплаты'], ['schedule', 'График'], ['price', 'Прайс-лист'],
-                ['library', 'Документация'], ['contracts', 'Договоры'], ['card', 'Реквизиты']];
+                ['brand', 'Бренд-бук'], ['library', 'Документация'],
+                ['contracts', 'Договоры'], ['card', 'Реквизиты']];
   const nav = '<nav class="tabs tabs--sub">' + subs.map((s) =>
     '<button class="tab' + (route.sub === s[0] ? ' tab--active' : '') + '" data-sub="' + s[0] + '" type="button">' +
     esc(s[1]) + '</button>').join('') + '</nav>';
@@ -953,6 +955,7 @@ function viewCp() {
       '<button class="btn" data-act="doc-new" data-cp="' + esc(c.id) + '" type="button">+ Документ</button>' +
       '<button class="btn" data-act="sched-new" data-cp="' + esc(c.id) + '" type="button">+ В график</button>' +
       '<button class="btn" data-sub="price" type="button">Прайс-лист</button>' +
+      '<button class="btn" data-sub="brand" type="button">Бренд-бук</button>' +
       '<button class="btn" data-sub="library" type="button">Документация</button>' +
     '</div></div>';
 
@@ -964,6 +967,7 @@ function viewCp() {
   else if (route.sub === 'schedule') body = cpSchedule(c);
   else if (route.sub === 'price') body = cpPrice(c);
   else if (route.sub === 'library') body = cpLibrary(c);
+  else if (route.sub === 'brand') body = cpBrand(c);
   else if (route.sub === 'contracts') body = cpContracts(c);
   else body = cpCard(c);
 
@@ -1813,47 +1817,187 @@ function loadHistory() {
 /* ------------------------------------------------------------------ */
 /* База документации контрагента                                      */
 /* ------------------------------------------------------------------ */
-/* Все файлы, которые относятся к контрагенту, в одном месте: и сканы
-   документов, и прайсы, и переписка, и то, что положили прямо сюда. */
+/* Плоский список всех файлов бесполезен: через полгода в нём сотни
+   строк. Поэтому сначала выбирается раздел, потом состояние подписания,
+   и только тогда показывается список. Поиск работает поверх всего и
+   выдаёт результат сразу, не требуя выбора. */
+
+/* Раздел определяется по тому, к чему файл приложен. У вложений
+   документа берётся тип самого документа, у остальных — вид владельца.
+   Порядок важен: подходит первое правило сверху. */
+const DOC_GROUPS = [
+  { key: 'contract', label: 'Договоры',
+    match: (f, t) => f.ownerKind === 'contract' || t === 'contract' },
+  { key: 'invoice', label: 'Счета', match: (f, t) => t === 'invoice' },
+  { key: 'spec', label: 'Спецификации', match: (f, t) => t === 'spec' },
+  { key: 'upd', label: 'УПД', match: (f, t) => t === 'upd' },
+  { key: 'act', label: 'Акты', match: (f, t) => t === 'act' },
+  { key: 'other', label: 'Прочее', match: () => true }
+];
+
+const SIGN_GROUPS = [
+  { key: 'both', label: 'Подписано с обеих сторон' },
+  { key: 'one', label: 'Подписано с одной стороны' },
+  { key: 'none', label: 'Не подписано' },
+  { key: '', label: 'Без отметки' }
+];
+
+function docTypeOfFile(f) {
+  if (f.ownerKind !== 'doc') return '';
+  const d = db().documents.find((x) => x.id === f.ownerId);
+  return d ? d.type : '';
+}
+
+function groupOfFile(f) {
+  const t = docTypeOfFile(f);
+  const g = DOC_GROUPS.find((x) => x.match(f, t));
+  return g ? g.key : 'other';
+}
+
+function tileHTML(attr, value, label, count, active) {
+  return '<button class="tile' + (active ? ' tile--active' : '') + (count ? '' : ' tile--empty') + '" ' +
+    attr + '="' + esc(value) + '" type="button">' +
+    '<span class="tile__count">' + count + '</span>' +
+    '<span class="tile__label">' + esc(label) + '</span>' +
+    '</button>';
+}
+
 function cpLibrary(c) {
   const all = filesOfCp(c.id);
   const needle = (filters.search || '').trim().toLowerCase();
-  const rows = all.filter((f) => {
-    if (filters.status && f.ownerKind !== filters.status) return false;
-    if (needle && f.name.toLowerCase().indexOf(needle) < 0) return false;
-    return true;
+
+  /* Поиск идёт первым и ни от чего не зависит: когда ищут конкретный
+     файл, разделы только мешают */
+  let searchCard = '';
+  if (needle) {
+    const found = all.filter((f) => f.name.toLowerCase().indexOf(needle) >= 0);
+    searchCard = card('Найдено по запросу «' + (filters.search || '').trim() + '»',
+      found.length
+        ? '<div class="files">' + found.map((f) => fileRowHTML(f, { showOwner: true })).join('') + '</div>'
+        : emptyBox('По этому запросу ничего нет'),
+      { tools: '<button class="btn btn--sm" data-act="search-clear" type="button">Очистить поиск</button>',
+        note: found.length ? 'Показано ' + found.length + ' ' +
+          plural(found.length, 'файл', 'файла', 'файлов') + ' из ' + all.length : '' });
+  }
+
+  const searchBox = card('Поиск по документации',
+    '<label class="field"><span>Название файла</span>' +
+      '<input type="search" data-filter="search" value="' + esc(filters.search || '') +
+      '" placeholder="договор, счёт, акт, скрин…" autocomplete="off"></label>',
+    { note: 'Ищет по всем разделам сразу. Найденное показывается сразу под поиском.' });
+
+  const upload = card('Загрузить документ',
+    attachBlock('cp', c.id, c.id, {
+      title: 'Перетащите файлы или нажмите, чтобы выбрать',
+      hint: 'Сюда кладут то, что не привязано к конкретному документу: переписку, доверенности, фото, скриншоты.'
+    }), { note: 'Файлы, приложенные к договорам, счетам, заказам и оплатам, попадают сюда сами.' });
+
+  /* Шаг 1 — раздел */
+  const groupCounts = {};
+  all.forEach((f) => {
+    const g = groupOfFile(f);
+    groupCounts[g] = (groupCounts[g] || 0) + 1;
   });
+  const groupTiles = DOC_GROUPS.map((g) =>
+    tileHTML('data-lib-group', g.key, g.label, groupCounts[g.key] || 0,
+      filters.libGroup === g.key)).join('');
 
-  const byKind = Object.keys(OWNER_TITLES).map((k) => ({
-    key: k, label: OWNER_TITLES[k], n: all.filter((f) => f.ownerKind === k).length
-  })).filter((x) => x.n);
+  if (!filters.libGroup) {
+    return searchBox + searchCard + upload +
+      card('Разделы документации — ' + c.name, '<div class="tiles">' + groupTiles + '</div>',
+        { note: 'Выберите раздел, затем состояние подписания — и откроется нужный список. ' +
+          'Всего файлов по контрагенту: ' + all.length + '.' });
+  }
 
-  const totalBytes = all.reduce((sum, f) => sum + (Number(f.size) || 0), 0);
+  const groupName = (DOC_GROUPS.find((g) => g.key === filters.libGroup) || {}).label || '';
+  const inGroup = all.filter((f) => groupOfFile(f) === filters.libGroup);
 
-  return '<div class="filters">' +
-      '<label class="field"><span>Откуда файл</span><select data-filter="status">' +
-        selectOptions([['', 'Отовсюду']].concat(byKind.map((x) => [x.key, x.label + ' (' + x.n + ')'])), filters.status) +
-      '</select></label>' +
-      '<label class="field" style="min-width:230px"><span>Поиск по имени</span>' +
-        '<input type="search" data-filter="search" value="' + esc(filters.search || '') + '" placeholder="договор, счёт, акт…"></label>' +
-      '<button class="btn" data-act="filters-reset" type="button">Сбросить</button>' +
-    '</div>' +
-    '<div class="kpi-grid">' +
-      kpi('Всего файлов', String(all.length), 'по контрагенту ' + c.name) +
-      kpi('Занимают', fmtSize(totalBytes), 'на диске этого компьютера') +
-      kpi('Показано', String(rows.length), 'по текущему фильтру') +
-    '</div>' +
-    card('Положить файл сюда',
-      attachBlock('cp', c.id, c.id, {
-        title: 'Перетащите файлы или нажмите, чтобы выбрать',
-        hint: 'Сюда кладут то, что не привязано к конкретному документу: переписку, доверенности, фото, скриншоты.'
-      })) +
-    card('Вся документация — ' + c.name,
+  /* Шаг 2 — состояние подписания */
+  const signCounts = {};
+  inGroup.forEach((f) => {
+    const k = f.kind || '';
+    signCounts[k] = (signCounts[k] || 0) + 1;
+  });
+  const signTiles = SIGN_GROUPS.map((sg) =>
+    tileHTML('data-lib-sign', sg.key || 'empty', sg.label, signCounts[sg.key] || 0,
+      filters.libSign === (sg.key || 'empty'))).join('') +
+    tileHTML('data-lib-sign', 'all', 'Все в разделе', inGroup.length, filters.libSign === 'all');
+
+  const crumbs = '<div class="crumbs">' +
+    '<button class="btn btn--sm" data-act="lib-back" type="button">← Все разделы</button>' +
+    '<span class="crumbs__sep">/</span><b>' + esc(groupName) + '</b>' +
+    (filters.libSign
+      ? '<span class="crumbs__sep">/</span><b>' +
+        esc(filters.libSign === 'all' ? 'Все в разделе'
+          : (SIGN_GROUPS.find((x) => (x.key || 'empty') === filters.libSign) || {}).label || '') + '</b>'
+      : '') +
+    '</div>';
+
+  if (!filters.libSign) {
+    return searchBox + searchCard + upload + crumbs +
+      card(groupName + ' — по состоянию подписания',
+        '<div class="tiles">' + signTiles + '</div>',
+        { note: 'В разделе «' + groupName + '» файлов: ' + inGroup.length +
+          '. Выберите состояние, чтобы увидеть список.' });
+  }
+
+  /* Шаг 3 — список */
+  const rows = filters.libSign === 'all'
+    ? inGroup
+    : inGroup.filter((f) => (f.kind || '') === (filters.libSign === 'empty' ? '' : filters.libSign));
+  const signName = filters.libSign === 'all' ? 'все состояния'
+    : ((SIGN_GROUPS.find((x) => (x.key || 'empty') === filters.libSign) || {}).label || '').toLowerCase();
+
+  return searchBox + searchCard + upload + crumbs +
+    card(groupName + ' · ' + signName,
       rows.length
         ? '<div class="files">' + rows.map((f) => fileRowHTML(f, { showOwner: true })).join('') + '</div>'
-        : emptyBox('По этому фильтру файлов нет'),
-      { note: 'Файлы из всех разделов контрагента: сканы документов, прайсы, вложения заказов, ' +
-        'договоров и оплат. Рядом с каждым написано, откуда он.' });
+        : emptyBox('В этом разделе с таким состоянием подписания файлов нет'),
+      { tools: '<button class="btn btn--sm" data-act="lib-back-sign" type="button">← К состояниям</button>',
+        note: rows.length
+          ? 'Показано ' + rows.length + ' ' + plural(rows.length, 'файл', 'файла', 'файлов') +
+            ' · занимают ' + fmtSize(rows.reduce((n, f) => n + (Number(f.size) || 0), 0))
+          : '' });
+}
+
+/* ------------------------------------------------------------------ */
+/* Бренд-бук контрагента                                              */
+/* ------------------------------------------------------------------ */
+/* Устроен как прайс-лист: присланные макеты файлами и правила словами.
+   Правила нужны отдельно от файлов — чтобы не открывать PDF ради того,
+   чтобы вспомнить основной цвет. */
+function cpBrand(c) {
+  const items = brandItems(c);
+
+  const table = items.length
+    ? '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+      '<th style="min-width:180px">Что</th><th style="min-width:200px">Значение</th>' +
+      '<th>Комментарий</th><th style="width:48px"></th></tr></thead><tbody>' +
+      items.map((it) =>
+        '<tr>' +
+        '<td><input data-brand="' + esc(it.id) + '" data-field="title" value="' + esc(it.title || '') +
+          '" placeholder="Основной цвет"></td>' +
+        '<td><input data-brand="' + esc(it.id) + '" data-field="value" value="' + esc(it.value || '') +
+          '" placeholder="#1B4332"></td>' +
+        '<td><input data-brand="' + esc(it.id) + '" data-field="note" value="' + esc(it.note || '') + '"></td>' +
+        '<td><button class="btn btn--sm btn--danger" data-act="brand-del" data-cp="' + esc(c.id) +
+          '" data-id="' + esc(it.id) + '" type="button" title="Убрать правило">✕</button></td>' +
+        '</tr>').join('') +
+      '</tbody></table></div>'
+    : emptyBox('Правил пока нет — добавьте первое или возьмите их из присланного бренд-бука');
+
+  return card('Правила бренда — ' + c.name,
+      table + '<div style="margin-top:12px" class="row-actions">' +
+      '<button class="btn btn--primary" data-act="brand-add" data-cp="' + esc(c.id) + '" type="button">+ Правило</button>' +
+    '</div>',
+    { note: 'Цвета, шрифты, правила логотипа, тон писем — то, что нужно под рукой, ' +
+      'не открывая файл. Поля сохраняются сразу по мере ввода.' }) +
+    card('Бренд-бук и макеты файлами',
+      attachBlock('brand', c.id, c.id, {
+        title: 'Перетащите бренд-бук или нажмите, чтобы выбрать',
+        hint: 'PDF бренд-бука, логотипы, шрифты, макеты упаковки и этикеток. Версий можно хранить несколько.'
+      }),
+      { note: 'Файлы бренд-бука видны и в разделе «Документация», в части «Прочее».' });
 }
 
 /* ------------------------------------------------------------------ */
@@ -2484,7 +2628,8 @@ function handleAction(act, node) {
 
   switch (act) {
     case 'filters-reset':
-      filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '', scan: '', search: '' };
+      filters = { cpId: '', contractId: '', method: '', from: '', to: '', status: '', scan: '', search: '',
+                  libGroup: '', libSign: '' };
       render(); return;
 
     case 'toggle-table': {
@@ -2494,6 +2639,31 @@ function handleAction(act, node) {
     }
 
     case 'go-payments': go('payments'); return;
+
+    /* Навигация по разделам документации */
+    case 'lib-back': filters.libGroup = ''; filters.libSign = ''; render(); return;
+    case 'lib-back-sign': filters.libSign = ''; render(); return;
+    case 'search-clear': filters.search = ''; render(); return;
+
+    /* Бренд-бук */
+    case 'brand-add': {
+      const c = cpById(cp);
+      if (!c) return;
+      brandItems(c).push({ id: uid('br'), title: '', value: '', note: '' });
+      save('Добавлено правило бренда — ' + c.name);
+      render();
+      const inputs = document.querySelectorAll('[data-brand][data-field="title"]');
+      if (inputs.length) inputs[inputs.length - 1].focus();
+      return;
+    }
+    case 'brand-del': {
+      const c = cpById(cp);
+      if (!c) return;
+      c.brandItems = brandItems(c).filter((x) => x.id !== id);
+      save('Убрано правило бренда — ' + c.name);
+      render();
+      return;
+    }
 
     /* Контрагенты и договоры */
     case 'cp-new': formCounterparty(''); return;
@@ -2847,8 +3017,25 @@ function init() {
       else go(view);
       return;
     }
+    const libG = e.target.closest('[data-lib-group]');
+    if (libG) {
+      filters.libGroup = libG.getAttribute('data-lib-group');
+      filters.libSign = '';
+      render();
+      return;
+    }
+    const libS = e.target.closest('[data-lib-sign]');
+    if (libS) { filters.libSign = libS.getAttribute('data-lib-sign'); render(); return; }
+
     const sub = e.target.closest('[data-sub]');
-    if (sub && route.view === 'cp') { route.sub = sub.getAttribute('data-sub'); render(); return; }
+    if (sub && route.view === 'cp') {
+      route.sub = sub.getAttribute('data-sub');
+      /* В документацию всегда заходим с выбора раздела, а не с того,
+         что смотрели в прошлый раз у другого контрагента */
+      if (route.sub === 'library') { filters.libGroup = ''; filters.libSign = ''; filters.search = ''; }
+      render();
+      return;
+    }
 
     const act = e.target.closest('[data-act]');
     if (act) { handleAction(act.getAttribute('data-act'), act); }
@@ -2860,6 +3047,9 @@ function init() {
     const f = e.target.closest('[data-filter]');
     if (f) {
       const key = f.getAttribute('data-filter');
+      /* Поиск обновляется по вводу, ниже — здесь он только мешал бы,
+         перерисовывая экран второй раз при уходе из поля */
+      if (key === 'search') return;
       filters[key] = f.value;
       if (key === 'cpId') filters.contractId = '';
       render();
@@ -2890,7 +3080,25 @@ function init() {
   /* Текстовые поля сохраняются по каждому нажатию клавиши: событие change
      у них приходит только при потере фокуса, и правка отставала бы на одно
      действие, а иногда и пропадала совсем. */
+  let searchTimer = null;
   document.addEventListener('input', (e) => {
+    /* Поиск ищет по мере набора. Перерисовка стирает поле вместе со всем
+       экраном, поэтому после неё возвращаем курсор в конец строки. */
+    const sf = e.target.closest('[data-filter="search"]');
+    if (sf) {
+      filters.search = sf.value;
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        render();
+        const again = document.querySelector('[data-filter="search"]');
+        if (again) {
+          again.focus();
+          again.setSelectionRange(again.value.length, again.value.length);
+        }
+      }, 220);
+      return;
+    }
+
     const of = e.target.closest('[data-order-field]');
     if (of && of.tagName !== 'SELECT') {
       const o = orderById(route.orderId);
@@ -2898,6 +3106,15 @@ function init() {
       o[of.getAttribute('data-order-field')] = of.value;
       save();
       updateOrderLive();
+      return;
+    }
+
+    const br = e.target.closest('[data-brand]');
+    if (br) {
+      const c = cpById(route.cpId);
+      if (!c) return;
+      const row = brandItems(c).find((x) => x.id === br.getAttribute('data-brand'));
+      if (row) { row[br.getAttribute('data-field')] = br.value; save(); }
       return;
     }
 

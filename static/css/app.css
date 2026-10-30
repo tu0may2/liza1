@@ -615,3 +615,29 @@ textarea { resize: vertical; min-height: 60px; }
 @media (max-width: 720px) {
   .menu__panel { right: auto; left: 0; }
 }
+
+/* ------------------------------------------------------------------ */
+/* Плитки выбора раздела                                               */
+/* ------------------------------------------------------------------ */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.tile {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 16px 16px 14px; text-align: left;
+  background: var(--bg-elev-2); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text); cursor: pointer;
+  transition: background .16s, border-color .16s, box-shadow .16s;
+}
+.tile:hover { border-color: var(--glow-edge); background: var(--accent-soft); }
+.tile--active { border-color: var(--glow-edge); box-shadow: 0 0 18px var(--glow-soft); }
+/* Пустой раздел не прячем: по нему видно, что документов такого типа
+   ещё нет, и это тоже ответ */
+.tile--empty { opacity: .55; }
+.tile__count { font-family: var(--display); font-size: 28px; line-height: 1.1; }
+.tile__label { font-size: 13.5px; color: var(--text-dim); }
+
+.crumbs {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 14px; color: var(--text-dim); font-size: 13.5px;
+}
+.crumbs__sep { color: var(--text-mute); }
+.crumbs b { color: var(--text); font-weight: 500; }

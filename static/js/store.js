@@ -81,6 +81,7 @@ function normalize(doc) {
   out.counterparties.forEach((c) => {
     if (!Array.isArray(c.contracts)) c.contracts = [];
     if (!Array.isArray(c.priceItems)) c.priceItems = [];
+    if (!Array.isArray(c.brandItems)) c.brandItems = [];
     delete c.priceFiles;   /* файлы переехали на сервер */
   });
   out.orders.forEach((o) => { if (!Array.isArray(o.items)) o.items = []; });
@@ -222,7 +223,7 @@ function removeCounterparty(cpId) {
   const d = db();
   /* Сначала собираем всё, что к нему относится: вложения этих записей
      сервер уберёт отдельно, по владельцу */
-  const owners = [['cp', cpId], ['price', cpId]];
+  const owners = [['cp', cpId], ['price', cpId], ['brand', cpId]];
   d.documents.filter((x) => x.cpId === cpId).forEach((x) => owners.push(['doc', x.id]));
   d.orders.filter((x) => x.cpId === cpId).forEach((x) => owners.push(['order', x.id]));
   d.payments.filter((x) => x.cpId === cpId).forEach((x) => owners.push(['pay', x.id]));
@@ -267,6 +268,16 @@ function priceItems(c) {
 
 function priceFiles(c) { return c ? filesOf('price', c.id) : []; }
 
+/* Бренд-бук контрагента: файлы макетов и правила словами. Устроен как
+   прайс-лист — у каждой компании свой. */
+function brandItems(c) {
+  if (!c) return [];
+  if (!Array.isArray(c.brandItems)) c.brandItems = [];
+  return c.brandItems;
+}
+
+function brandFiles(c) { return c ? filesOf('brand', c.id) : []; }
+
 /* Сводка по вложениям документа: сколько файлов и подписан ли он.
    Документ считается подписанным, если хотя бы один скан подписан
    обеими сторонами — именно такой экземпляр имеет силу. */
@@ -284,7 +295,7 @@ function liveOwners() {
   const d = db();
   const out = [];
   d.counterparties.forEach((c) => {
-    out.push('cp:' + c.id, 'price:' + c.id);
+    out.push('cp:' + c.id, 'price:' + c.id, 'brand:' + c.id);
     (c.contracts || []).forEach((k) => out.push('contract:' + k.id));
   });
   d.orders.forEach((o) => out.push('order:' + o.id));
@@ -400,6 +411,12 @@ function seedState() {
     city: 'Хабаровск', address: 'г. Хабаровск, ул. Ленина, 18, оф. 404',
     contactPerson: 'Игнатьев Сергей', phone: '+7 (914) 200-10-10', email: 'sales@amur.example',
     manager: 'Лиза', note: 'Работаем по двум договорам: основной денежный и бартерный.',
+    brandItems: [
+      { id: 'br-a1', title: 'Основной цвет', value: '#1B4332', note: 'Фон упаковки и вывесок.' },
+      { id: 'br-a2', title: 'Дополнительный цвет', value: '#D8F3DC', note: 'Подложки, выноски.' },
+      { id: 'br-a3', title: 'Шрифт заголовков', value: 'PT Sans Narrow Bold', note: '' },
+      { id: 'br-a4', title: 'Логотип', value: 'Только на светлом фоне', note: 'Инверсию не используем.' }
+    ],
     priceItems: [
       { id: 'pi-a1', article: 'МР-25', name: 'Мука рыбная, мешок 25 кг', unit: 'т', price: 71000, note: 'Цена действует с начала квартала.' },
       { id: 'pi-a2', article: 'СЛ-2', name: 'Соль пищевая помол №2', unit: 'т', price: 9800, note: '' },
@@ -419,6 +436,10 @@ function seedState() {
     city: 'Южно-Сахалинск', address: 'г. Южно-Сахалинск, пр. Мира, 112',
     contactPerson: 'Ким Ольга', phone: '+7 (962) 300-44-55', email: 'zakaz@sakh-sharks.example',
     manager: 'Лиза', note: 'Один договор, оплата преимущественно безналом.',
+    brandItems: [
+      { id: 'br-s1', title: 'Основной цвет', value: '#0B2545', note: 'Корпоративная синь.' },
+      { id: 'br-s2', title: 'Шрифт', value: 'Montserrat', note: 'Везде, кроме документов.' }
+    ],
     priceItems: [
       { id: 'pi-s1', article: 'ЯЩ-20', name: 'Ящик рыбный 20 кг', unit: 'шт', price: 165, note: '' },
       { id: 'pi-s2', article: 'ЛД-Т', name: 'Лёд технический', unit: 'т', price: 4200, note: 'Доставка по городу включена.' }
